@@ -4,9 +4,8 @@
   "description": "QR Mint — Solana program deploy scripts",
   "type": "module",
   "scripts": {
-    "build": "cargo build-sbf --manifest-path ../Cargo.toml",
-    "deploy": "tsx src/deploy.ts",
-    "init-collection": "tsx src/init-collection.ts",
+    "build": "cargo build-sbf --manifest-path ./collection/Cargo.toml",
+    "deploy": "tsx src/deployCollection.ts",
     "check-balance": "tsx src/check-balance.ts"
   },
   "dependencies": {

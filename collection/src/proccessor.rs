@@ -78,6 +78,7 @@ fn process_init_collection(
     let system_prog = next_account_info(iter)?;
 
     require_signer(authority)?;
+    require_program(&solana_program::system_program::id(), system_prog.key)?;
 
     let (pda, bump) = Pubkey::find_program_address(
         &[b"collection", authority.key.as_ref()],
@@ -121,6 +122,8 @@ fn process_mint_nft(
     let system_prog = next_account_info(iter)?;
 
     require_signer(payer)?;
+    require_program(&solana_program::system_program::id(), system_prog.key)?;
+    require_owned_by(coll_pda, program_id)?;
 
     if proxy_fee_bps > 5000 {
         return Err(NftError::FeeTooHigh.into());
@@ -223,6 +226,7 @@ fn process_proxy_forward(
     let fee_recipient= next_account_info(iter)?;
     let _system_prog = next_account_info(iter)?;
 
+    require_owned_by(nft_pda, program_id)?;
     let mut nft = NftState::try_from_slice(&nft_pda.data.borrow())?;
 
     // Проверяем что proxy_target совпадает с записанным
@@ -257,8 +261,10 @@ fn process_proxy_forward(
         (0u64, available)
     } else {
         let fee = available
-            .checked_mul(nft.proxy_fee_bps as u64).unwrap()
-            .checked_div(10000).unwrap();
+            .checked_mul(nft.proxy_fee_bps as u64)
+            .ok_or(NftError::MathOverflow)?
+            .checked_div(10000)
+            .ok_or(NftError::MathOverflow)?;
         (fee, available - fee)
     };
 
@@ -312,8 +318,10 @@ fn process_fraction_forward<'a>(
         )?;
 
         let share = available
-            .checked_mul(child.share_bps as u64).unwrap()
-            .checked_div(10000).unwrap();
+            .checked_mul(child.share_bps as u64)
+            .ok_or(NftError::MathOverflow)?
+            .checked_div(10000)
+            .ok_or(NftError::MathOverflow)?;
 
         if share > 0 {
             **nft_pda.try_borrow_mut_lamports()? -= share;
@@ -322,10 +330,11 @@ fn process_fraction_forward<'a>(
             // Обновляем total_received дочернего NFT
             let mut child_state =
                 NftState::try_from_slice(&child_accounts[i].data.borrow())?;
-            child_state.total_received_lamports += share;
+            child_state.total_received_lamports =
+                child_state.total_received_lamports.saturating_add(share);
             child_state.serialize(&mut *child_accounts[i].try_borrow_mut_data()?)?;
         }
-        distributed += share;
+        distributed = distributed.saturating_add(share);
     }
 
     // Остаток → proxy_target
@@ -335,8 +344,8 @@ fn process_fraction_forward<'a>(
         **proxy_target.try_borrow_mut_lamports()? += remainder;
     }
 
-    nft.total_received_lamports += available;
-    nft.total_forwarded_lamports += available;
+    nft.total_received_lamports = nft.total_received_lamports.saturating_add(available);
+    nft.total_forwarded_lamports = nft.total_forwarded_lamports.saturating_add(available);
     nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
 
     msg!(
@@ -385,7 +394,8 @@ fn process_withdraw(
     **nft_pda.try_borrow_mut_lamports()? -= amount_lamports;
     **destination.try_borrow_mut_lamports()? += amount_lamports;
 
-    nft.total_forwarded_lamports += amount_lamports;
+    nft.total_forwarded_lamports =
+        nft.total_forwarded_lamports.saturating_add(amount_lamports);
     nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
 
     msg!("Withdraw {} lamports from {:?} storage", amount_lamports, nft.kind);
@@ -466,6 +476,9 @@ fn process_clone_nft(
     let system_prog  = next_account_info(iter)?;
 
     require_signer(owner)?;
+    require_owned_by(coll_pda, program_id)?;
+    require_owned_by(original_pda, program_id)?;
+    require_program(&solana_program::system_program::id(), system_prog.key)?;
 
     let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
     let mut original = NftState::try_from_slice(&original_pda.data.borrow())?;
@@ -526,7 +539,7 @@ fn process_clone_nft(
     )?;
 
     // Начисляем награды
-    original.clone_count += 1;
+    original.clone_count = original.clone_count.saturating_add(1);
 
     if original.kind == NftKind::CloneV2 && original.generation >= 1 {
         // CloneV2: gen0 получает 80%, родитель (generation >= 1) получает 20%
@@ -535,7 +548,8 @@ fn process_clone_nft(
         let origin_share  = reward * 80 / 100;
 
         // Родитель (accounts[2] = original_pda) получает 20%
-        original.pending_rewards_lamports += parent_share;
+        original.pending_rewards_lamports =
+            original.pending_rewards_lamports.saturating_add(parent_share);
 
         // Gen0 получает 80% — нужен дополнительный аккаунт
         if let Some(gen0_acc) = accounts.get(6) {
@@ -545,15 +559,18 @@ fn process_clone_nft(
             let expected_gen0 = original.original_nft.ok_or(NftError::MissingGen0Account)?;
             require_key(&expected_gen0, gen0_acc.key, NftError::MissingGen0Account)?;
 
-            gen0.pending_rewards_lamports += origin_share;
+            gen0.pending_rewards_lamports =
+                gen0.pending_rewards_lamports.saturating_add(origin_share);
             gen0.serialize(&mut *gen0_acc.try_borrow_mut_data()?)?;
         } else {
             // Gen0 аккаунт не передан — кладём весь reward родителю
-            original.pending_rewards_lamports += origin_share;
+            original.pending_rewards_lamports =
+                original.pending_rewards_lamports.saturating_add(origin_share);
         }
     } else {
         // Clone v1 или CloneV2 generation=0: весь reward → оригинал
-        original.pending_rewards_lamports += coll.clone_reward_lamports;
+        original.pending_rewards_lamports =
+            original.pending_rewards_lamports.saturating_add(coll.clone_reward_lamports);
     }
 
     original.serialize(&mut *original_pda.try_borrow_mut_data()?)?;
@@ -686,6 +703,8 @@ fn process_auto_mint(
     let system_prog  = next_account_info(iter)?;
 
     require_signer(sender)?;
+    require_program(&solana_program::system_program::id(), system_prog.key)?;
+    require_owned_by(coll_pda, program_id)?;
 
     let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
     let trigger = NftState::try_from_slice(&trigger_pda.data.borrow())?;
@@ -702,8 +721,10 @@ fn process_auto_mint(
 
     // fee → владельцу trigger NFT (owner AddressV6)
     let fee = price
-        .checked_mul(trigger.proxy_fee_bps as u64).unwrap()
-        .checked_div(10000).unwrap();
+        .checked_mul(trigger.proxy_fee_bps as u64)
+        .ok_or(NftError::MathOverflow)?
+        .checked_div(10000)
+        .ok_or(NftError::MathOverflow)?;
     let to_treasury = price - fee;
 
     if fee > 0 {
@@ -781,6 +802,20 @@ fn require_key(expected: &Pubkey, actual: &Pubkey, err: NftError) -> ProgramResu
     Ok(())
 }
 
+fn require_owned_by(acc: &AccountInfo, owner: &Pubkey) -> ProgramResult {
+    if acc.owner != owner {
+        return Err(NftError::WrongAccountOwner.into());
+    }
+    Ok(())
+}
+
+fn require_program(expected: &Pubkey, actual: &Pubkey) -> ProgramResult {
+    if expected != actual {
+        return Err(NftError::WrongProgramId.into());
+    }
+    Ok(())
+}
+
 fn create_pda_account<'a>(
     program_id: &Pubkey,
     payer: &AccountInfo<'a>,
@@ -792,6 +827,10 @@ fn create_pda_account<'a>(
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(data.len());
 
+    if !pda.data_is_empty() || pda.lamports() > 0 {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+
     invoke_signed(
         &system_instruction::create_account(
             payer.key, pda.key, lamports, data.len() as u64, program_id,
@@ -801,5 +840,44 @@ fn create_pda_account<'a>(
     )?;
 
     pda.try_borrow_mut_data()?.copy_from_slice(data);
+    Ok(())
+}
+
+// ──────────────────────────────────────────
+// HANDLER 4: Передача NFT с кастомными проверками
+// ──────────────────────────────────────────
+fn process_transfer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    new_owner: Pubkey,
+) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+    let owner = next_account_info(accounts_iter)?;
+    let nft_pda = next_account_info(accounts_iter)?;
+    let collection_pda = next_account_info(accounts_iter)?;
+
+    if !owner.is_signer {
+        return Err(NftError::Unauthorized.into());
+    }
+
+    let mut nft = NftState::try_from_slice(&nft_pda.data.borrow())?;
+    let collection = CollectionState::try_from_slice(&collection_pda.data.borrow())?;
+
+    if nft.owner != *owner.key {
+        return Err(NftError::NotOwner.into());
+    }
+    if nft.is_burned {
+        return Err(NftError::AlreadyBurned.into());
+    }
+
+    // SBT (Soul Bound Token) — нельзя передавать никому никогда
+    if nft.kind == NftKind::SBT {
+        return Err(NftError::SbtNotTransferable.into());
+    }
+
+    nft.owner = new_owner;
+    nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
+
+    msg!("NFT #{} transferred to {}", nft.mint_index, new_owner);
     Ok(())
 }

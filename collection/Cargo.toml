@@ -8,6 +8,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 solana-program = "1.18"
-borsh = { version = "0.10", features = ["derive"] }
+borsh = "0.10.4"
+borsh-derive = "0.10.4"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
-mpl-token-metadata = { version = "4.1", features = ["no-entrypoint"] }
+thiserror = "1.0"

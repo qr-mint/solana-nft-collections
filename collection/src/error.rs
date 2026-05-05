@@ -19,6 +19,12 @@ pub enum NftError {
     #[error("Wrong fee recipient")]        WrongFeeRecipient,
     #[error("Cannot fraction this NFT")]   CannotFraction,
     #[error("Missing gen0 account")]       MissingGen0Account,
+    #[error("Math overflow")]             MathOverflow,
+    #[error("Wrong account owner")]        WrongAccountOwner,
+    #[error("Wrong program id")]           WrongProgramId,
+    #[error("SBT cannot be transferred")]  SbtNotTransferable,
+    #[error("Transfer not allowed")]       TransferNotAllowed,
+    #[error("Already burned")]             AlreadyBurned,
 }
 
 impl From<NftError> for ProgramError {

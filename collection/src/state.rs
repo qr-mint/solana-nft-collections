@@ -31,6 +31,8 @@ pub struct CollectionState {
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq)]
 pub enum NftKind {
+    Default,
+    SBT,
     Address,           // proxy → произвольный target, fee → collection authority
     AddressV2,         // proxy → произвольный target, без fee
     AddressV3,         // статическое хранилище SOL, вывод вручную
