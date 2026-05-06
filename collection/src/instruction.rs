@@ -17,6 +17,10 @@ pub enum NftInstruction {
     /// Mint a new NFT state account.
     /// Accounts: [payer(signer), collection_pda(writable), nft_pda(writable), mint, system_program]
     MintNft {
+        name: String,
+        symbol: String,
+        uri: String,
+        seller_fee_bps: u16,
         kind: NftKind,
         proxy_target: Pubkey,
         proxy_fee_bps: u16,
@@ -49,12 +53,12 @@ pub enum NftInstruction {
         new_nft_kind: NftKind,
         new_proxy_target: Pubkey,
     },
-    
+
     /// Clone Clone/CloneV2 NFT.
     /// Accounts: [owner(signer), collection_pda(writable), original_pda(writable), new_nft_pda(writable), new_mint, system_program, (optional gen0_pda)]
     Transfer {
         new_owner: Pubkey,
-    }
+    },
 
     BurnNft,
 }

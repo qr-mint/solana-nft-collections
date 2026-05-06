@@ -17,6 +17,12 @@ use crate::{
     state::{CollectionState, FractionChild, NftKind, NftState},
 };
 
+use mpl_token_metadata::{
+    instructions::CreateMetadataAccountV3Builder,
+    types::DataV2,
+    ID as METADATA_PROGRAM_ID,
+};
+
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -33,9 +39,9 @@ pub fn process_instruction(
             total_supply, uri_base,
             clone_reward_lamports, auto_mint_price_lamports,
         ),
-
-        NftInstruction::MintNft { kind, proxy_target, proxy_fee_bps, fraction_children } =>
-            process_mint_nft(program_id, accounts, kind, proxy_target, proxy_fee_bps, fraction_children),
+       
+        NftInstruction::MintNft { name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children } =>
+            process_mint_nft(program_id, accounts, name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children),
 
         NftInstruction::ProxyForward =>
             process_proxy_forward(program_id, accounts),
@@ -55,8 +61,8 @@ pub fn process_instruction(
         NftInstruction::AutoMint { new_nft_kind, new_proxy_target } =>
             process_auto_mint(program_id, accounts, new_nft_kind, new_proxy_target),
 
-        NftInstruction::Transfer => { recipient } =>
-            process_transfer(program_id, accounts, recipient),
+        NftInstruction::Transfer { new_owner } =>
+            process_transfer(program_id, accounts, new_owner),
 
         NftInstruction::BurnNft =>
             process_burn_nft(program_id, accounts),
@@ -111,13 +117,12 @@ fn process_init_collection(
 // ════════════════════════════════════════════════════════
 
 fn process_mint_nft(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
     name: String,
     symbol: String,
     uri: String,
     seller_fee_bps: u16,
-    //
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
     kind: NftKind,
     proxy_target: Pubkey,
     proxy_fee_bps: u16,
@@ -128,7 +133,11 @@ fn process_mint_nft(
     let coll_pda    = next_account_info(iter)?;
     let nft_pda     = next_account_info(iter)?;
     let mint        = next_account_info(iter)?;
-    let system_prog = next_account_info(iter)?;
+    let metadata_account = next_account_info(iter)?; // ← добавили
+    let metadata_program = next_account_info(iter)?; // ← добавили
+    let token_program    = next_account_info(iter)?; // ← добавили
+    let system_prog      = next_account_info(iter)?;
+    let rent_sysvar      = next_account_info(iter)?; // ← добавили
 
     require_signer(payer)?;
     require_program(&solana_program::system_program::id(), system_prog.key)?;
@@ -180,6 +189,10 @@ fn process_mint_nft(
         .collect();
 
     let state = NftState {
+        name: name.clone(),
+        symbol: symbol.clone(),
+        uri: uri.clone(),
+        seller_fee_bps: seller_fee_bps,
         kind,
         collection: *coll_pda.key,
         mint: *mint.key,
@@ -198,12 +211,26 @@ fn process_mint_nft(
         pending_rewards_lamports: 0,
         total_received_lamports: 0,
         total_forwarded_lamports: 0,
-
-        name: name.clone(),
-        symbol: symbol.clone(),
-        uri: uri.clone(),
-        seller_fee_bps,
     };
+
+    // 1. Создаём PDA аккаунт NftState
+    create_pda_account(
+        program_id, payer, nft_pda, system_prog,
+        &state.try_to_vec()?,
+        &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
+    )?;
+
+    // 2. Инициализируем SPL Mint (decimals=0 = NFT)
+    invoke(
+        &spl_token::instruction::initialize_mint(
+            token_program.key,
+            mint.key,
+            nft_pda.key,
+            None,
+            0,
+        )?,
+        &[mint.clone(), rent_sysvar.clone(), token_program.clone()],
+    )?;
 
     let metadata_ix = CreateMetadataAccountV3Builder::new()
         .metadata(*metadata_account.key)
@@ -222,12 +249,6 @@ fn process_mint_nft(
         })
         .is_mutable(true)
         .instruction();
-
-    create_pda_account(
-        program_id, payer, nft_pda, system_prog,
-        &state.try_to_vec()?,
-        &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
-    )?;
 
     coll.minted_count += 1;
     coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
@@ -647,6 +668,10 @@ fn process_auto_mint(
     require_key(&new_pda_key, new_nft_pda.key, NftError::InvalidPda)?;
 
     let new_nft = NftState {
+        name: trigger.name.clone(),
+        symbol: trigger.symbol.clone(),
+        uri: trigger.uri.clone(),
+        seller_fee_bps: trigger.seller_fee_bps,
         kind: new_nft_kind,
         collection: *coll_pda.key,
         mint: *new_mint.key,
@@ -752,6 +777,127 @@ fn create_pda_account<'a>(
 //   Если клонируем generation 0: весь reward идёт gen0 (= original)
 // ════════════════════════════════════════════════════════
 
+fn process_clone_nft(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    recipient: Pubkey,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let owner        = next_account_info(iter)?;
+    let coll_pda     = next_account_info(iter)?;
+    let original_pda = next_account_info(iter)?; // NFT который клонируем
+    let new_nft_pda  = next_account_info(iter)?;
+    let new_mint     = next_account_info(iter)?;
+    let system_prog  = next_account_info(iter)?;
+
+    require_signer(owner)?;
+
+    let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
+    let mut original = NftState::try_from_slice(&original_pda.data.borrow())?;
+
+    if original.owner != *owner.key {
+        return Err(NftError::NotOwner.into());
+    }
+    match original.kind {
+        NftKind::Clone | NftKind::CloneV2 => {}
+        _ => return Err(NftError::WrongNftKind.into()),
+    }
+    if coll.minted_count >= coll.total_supply {
+        return Err(NftError::CollectionFull.into());
+    }
+
+    let new_index = coll.minted_count;
+    let (new_pda_key, bump) = Pubkey::find_program_address(
+        &[b"nft", coll_pda.key.as_ref(), &new_index.to_le_bytes()],
+        program_id,
+    );
+    require_key(&new_pda_key, new_nft_pda.key, NftError::InvalidPda)?;
+
+    // Определяем original_nft и parent_nft для новой копии
+    let (new_original_nft, new_parent_nft) = if original.generation == 0 {
+        // Клонируем оригинал → копия знает своего родителя
+        (Some(*original_pda.key), None)
+    } else {
+        // Клонируем копию → original_nft = gen0, parent = текущий
+        let gen0 = original.original_nft.unwrap_or(*original_pda.key);
+        (Some(gen0), Some(*original_pda.key))
+    };
+
+    let new_nft = NftState {
+        name: original.name.clone(),
+        symbol: original.symbol.clone(),
+        uri: original.uri.clone(),
+        seller_fee_bps: original.seller_fee_bps,
+        kind: original.kind.clone(),
+        collection: *coll_pda.key,
+        mint: *new_mint.key,
+        owner: recipient,
+        mint_index: new_index,
+        is_burned: false,
+        proxy_target: recipient,    // копия проксирует на получателя по умолчанию
+        proxy_fee_bps: 0,
+        fee_recipient: recipient,
+        can_fraction: false,
+        fraction_children: vec![],
+        original_nft: new_original_nft,
+        parent_nft: new_parent_nft,
+        generation: original.generation + 1,
+        clone_count: 0,
+        pending_rewards_lamports: 0,
+        total_received_lamports: 0,
+        total_forwarded_lamports: 0,
+    };
+
+    create_pda_account(
+        program_id, owner, new_nft_pda, system_prog,
+        &new_nft.try_to_vec()?,
+        &[b"nft", coll_pda.key.as_ref(), &new_index.to_le_bytes(), &[bump]],
+    )?;
+
+    // Начисляем награды
+    original.clone_count += 1;
+
+    if original.kind == NftKind::CloneV2 && original.generation >= 1 {
+        // CloneV2: gen0 получает 80%, родитель (generation >= 1) получает 20%
+        let reward = coll.clone_reward_lamports;
+        let parent_share  = reward * 20 / 100;
+        let origin_share  = reward * 80 / 100;
+
+        // Родитель (accounts[2] = original_pda) получает 20%
+        original.pending_rewards_lamports += parent_share;
+
+        // Gen0 получает 80% — нужен дополнительный аккаунт
+        if let Some(gen0_acc) = accounts.get(6) {
+            let mut gen0 = NftState::try_from_slice(&gen0_acc.data.borrow())?;
+
+            // Проверяем что это действительно gen0 оригинал
+            let expected_gen0 = original.original_nft.ok_or(NftError::MissingGen0Account)?;
+            require_key(&expected_gen0, gen0_acc.key, NftError::MissingGen0Account)?;
+
+            gen0.pending_rewards_lamports += origin_share;
+            gen0.serialize(&mut *gen0_acc.try_borrow_mut_data()?)?;
+        } else {
+            // Gen0 аккаунт не передан — кладём весь reward родителю
+            original.pending_rewards_lamports += origin_share;
+        }
+    } else {
+        // Clone v1 или CloneV2 generation=0: весь reward → оригинал
+        original.pending_rewards_lamports += coll.clone_reward_lamports;
+    }
+
+    original.serialize(&mut *original_pda.try_borrow_mut_data()?)?;
+
+    coll.minted_count += 1;
+    coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
+
+    msg!(
+        "Cloned NFT #{} → new #{} for {}, generation={}, kind={:?}",
+        original.mint_index, new_index, recipient,
+        new_nft.generation, new_nft.kind
+    );
+    Ok(())
+}
+
 // ──────────────────────────────────────────
 // HANDLER 4: Передача NFT с кастомными проверками
 // ──────────────────────────────────────────
@@ -783,105 +929,8 @@ fn process_transfer(
     if nft.kind == NftKind::SBT {
         return Err(NftError::SbtNotTransferable.into());
     }
-    else if nft.kind == NftKind::CloneV2 || == NftKind::Clone {
-        ///
-        let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
-        let mut original = NftState::try_from_slice(&original_pda.data.borrow())?;
-
-        match original.kind {
-            NftKind::Clone | NftKind::CloneV2 => {}
-            _ => return Err(NftError::WrongNftKind.into()),
-        }
-        if coll.minted_count >= coll.total_supply {
-            return Err(NftError::CollectionFull.into());
-        }
-
-        let new_index = coll.minted_count;
-        let (new_pda_key, bump) = Pubkey::find_program_address(
-            &[b"nft", coll_pda.key.as_ref(), &new_index.to_le_bytes()],
-            program_id,
-        );
-        require_key(&new_pda_key, new_nft_pda.key, NftError::InvalidPda)?;
-        ///
-        // Определяем original_nft и parent_nft для новой копии
-        let (new_original_nft, new_parent_nft) = if original.generation == 0 {
-        // Клонируем оригинал → копия знает своего родителя
-            (Some(*original_pda.key), None)
-        } else {
-            // Клонируем копию → original_nft = gen0, parent = текущий
-            let gen0 = original.original_nft.unwrap_or(*original_pda.key);
-            (Some(gen0), Some(*original_pda.key))
-        };
-        let new_nft = NftState {
-            kind: original.kind.clone(),
-            collection: *coll_pda.key,
-            mint: *new_mint.key,
-            owner: recipient,
-            mint_index: new_index,
-            is_burned: false,
-            proxy_target: recipient,    // копия проксирует на получателя по умолчанию
-            proxy_fee_bps: 0,
-            fee_recipient: recipient,
-            can_fraction: false,
-            fraction_children: vec![],
-            original_nft: new_original_nft,
-            parent_nft: new_parent_nft,
-            generation: original.generation + 1,
-            clone_count: 0,
-            pending_rewards_lamports: 0,
-            total_received_lamports: 0,
-            total_forwarded_lamports: 0,
-        };
-
-        create_pda_account(
-            program_id, owner, new_nft_pda, system_prog,
-            &new_nft.try_to_vec()?,
-            &[b"nft", coll_pda.key.as_ref(), &new_index.to_le_bytes(), &[bump]],
-        )?;
-    
-        // Начисляем награды
-        original.clone_count = original.clone_count.saturating_add(1);
-    
-        if original.kind == NftKind::CloneV2 && original.generation >= 1 {
-            // CloneV2: gen0 получает 80%, родитель (generation >= 1) получает 20%
-            let reward = coll.clone_reward_lamports;
-            let parent_share  = reward * 20 / 100;
-            let origin_share  = reward * 80 / 100;
-    
-            // Родитель (accounts[2] = original_pda) получает 20%
-            original.pending_rewards_lamports =
-                original.pending_rewards_lamports.saturating_add(parent_share);
-    
-            // Gen0 получает 80% — нужен дополнительный аккаунт
-            if let Some(gen0_acc) = accounts.get(6) {
-                let mut gen0 = NftState::try_from_slice(&gen0_acc.data.borrow())?;
-    
-                // Проверяем что это действительно gen0 оригинал
-                let expected_gen0 = original.original_nft.ok_or(NftError::MissingGen0Account)?;
-                require_key(&expected_gen0, gen0_acc.key, NftError::MissingGen0Account)?;
-    
-                gen0.pending_rewards_lamports =
-                    gen0.pending_rewards_lamports.saturating_add(origin_share);
-                gen0.serialize(&mut *gen0_acc.try_borrow_mut_data()?)?;
-            } else {
-                // Gen0 аккаунт не передан — кладём весь reward родителю
-                original.pending_rewards_lamports =
-                    original.pending_rewards_lamports.saturating_add(origin_share);
-            }
-        } else {
-            // Clone v1 или CloneV2 generation=0: весь reward → оригинал
-            original.pending_rewards_lamports =
-                original.pending_rewards_lamports.saturating_add(coll.clone_reward_lamports);
-        }
-        original.serialize(&mut *original_pda.try_borrow_mut_data()?)?;
-
-        coll.minted_count += 1;
-        coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
-        msg!(
-            "Cloned NFT #{} → new #{} for {}, generation={}, kind={:?}",
-            original.mint_index, new_index, recipient,
-            new_nft.generation, new_nft.kind
-        );
+    if nft.kind == NftKind::Clone || nft.kind == NftKind::CloneV2 {
+        return process_clone_nft(program_id, accounts, new_owner);
     }
 
     nft.owner = new_owner;
