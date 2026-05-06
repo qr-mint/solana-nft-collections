@@ -10,10 +10,10 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
     ProxyForward:         2,
     Withdraw:             3,
     WithdrawTokens:       4,
-    CloneNft:             5,
-    ClaimCloneRewards:    6,
-    UpdateFractions:      7,
-    AutoMint:             8,
+    ClaimCloneRewards:    5,
+    UpdateFractions:      6,
+    AutoMint:             7,
+    Transfer:             8,
     BurnNft:              9,
   };
 
