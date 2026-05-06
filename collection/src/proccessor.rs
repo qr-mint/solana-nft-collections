@@ -57,6 +57,9 @@ pub fn process_instruction(
 
         NftInstruction::AutoMint { new_nft_kind, new_proxy_target } =>
             process_auto_mint(program_id, accounts, new_nft_kind, new_proxy_target),
+
+        NftInstruction::BurnNft =>
+            process_burn_nft(program_id, accounts),
     }
 }
 
@@ -107,6 +110,11 @@ fn process_init_collection(
 // ════════════════════════════════════════════════════════
 
 fn process_mint_nft(
+    name: String,
+    symbol: String,
+    uri: String,
+    seller_fee_bps: u16,
+    //
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     kind: NftKind,
@@ -189,7 +197,30 @@ fn process_mint_nft(
         pending_rewards_lamports: 0,
         total_received_lamports: 0,
         total_forwarded_lamports: 0,
+
+        name: name.clone(),
+        symbol: symbol.clone(),
+        uri: uri.clone(),
+        seller_fee_bps,
     };
+
+    let metadata_ix = CreateMetadataAccountV3Builder::new()
+        .metadata(*metadata_account.key)
+        .mint(*mint.key)
+        .mint_authority(*nft_pda.key)
+        .payer(*payer.key)
+        .update_authority(*nft_pda.key, true)
+        .data(DataV2 {
+            name,
+            symbol,
+            uri,
+            seller_fee_basis_points: seller_fee_bps,
+            creators: None,
+            collection: None,
+            uses: None,
+        })
+        .is_mutable(true)
+        .instruction();
 
     create_pda_account(
         program_id, payer, nft_pda, system_prog,
@@ -879,5 +910,90 @@ fn process_transfer(
     nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
 
     msg!("NFT #{} transferred to {}", nft.mint_index, new_owner);
+    Ok(())
+}
+
+fn process_burn_nft(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let owner       = next_account_info(iter)?;
+    let nft_pda     = next_account_info(iter)?;
+    let coll_pda    = next_account_info(iter)?;
+    let mint        = next_account_info(iter)?;
+    let token_account = next_account_info(iter)?;
+    let token_program = next_account_info(iter)?;
+
+    require_signer(owner)?;
+
+    let mut nft = NftState::try_from_slice(&nft_pda.data.borrow())?;
+
+    // Проверки
+    if nft.owner != *owner.key {
+        return Err(NftError::NotOwner.into());
+    }
+    if nft.is_burned {
+        return Err(NftError::AlreadyBurned.into());
+    }
+
+    // SBT нельзя сжигать
+    if nft.kind == NftKind::SBT {
+        return Err(NftError::SbtNotTransferable.into());
+    }
+
+    // Нельзя сжечь если на хранилище есть средства (V3, V3j, V4Fraction)
+    match nft.kind {
+        NftKind::AddressV3 | NftKind::AddressV3j | NftKind::AddressV4Fraction => {
+            let rent = Rent::get()?;
+            let min_balance = rent.minimum_balance(nft_pda.data_len());
+            let available = nft_pda.lamports().saturating_sub(min_balance);
+            if available > 0 {
+                return Err(NftError::StorageNotEmpty.into());
+            }
+        }
+        _ => {}
+    }
+
+    // 1. Сжигаем SPL токен через CPI
+    let (_, bump) = Pubkey::find_program_address(
+        &[b"nft", nft.collection.as_ref(), &nft.mint_index.to_le_bytes()],
+        program_id,
+    );
+
+    invoke_signed(
+        &spl_token::instruction::burn(
+            token_program.key,
+            token_account.key,
+            mint.key,
+            nft_pda.key, // authority
+            &[],
+            1,           // amount = 1 (NFT)
+        )?,
+        &[
+            token_account.clone(),
+            mint.clone(),
+            nft_pda.clone(),
+            token_program.clone(),
+        ],
+        &[&[
+            b"nft",
+            nft.collection.as_ref(),
+            &nft.mint_index.to_le_bytes(),
+            &[bump],
+        ]],
+    )?;
+
+    // 2. Помечаем NFT как сожжённый в state
+    nft.is_burned = true;
+    nft.owner = Pubkey::default(); // обнуляем владельца
+    nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
+
+    // 3. Возвращаем rent владельцу (закрываем PDA аккаунт)
+    let nft_lamports = nft_pda.lamports();
+    **nft_pda.try_borrow_mut_lamports()? = 0;
+    **owner.try_borrow_mut_lamports()? += nft_lamports;
+
+    msg!("NFT #{} burned by {}", nft.mint_index, owner.key);
     Ok(())
 }

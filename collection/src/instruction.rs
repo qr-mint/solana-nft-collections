@@ -53,4 +53,6 @@ pub enum NftInstruction {
         new_nft_kind: NftKind,
         new_proxy_target: Pubkey,
     },
+
+    BurnNft,
 }

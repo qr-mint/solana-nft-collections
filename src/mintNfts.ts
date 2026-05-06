@@ -8,7 +8,11 @@ import {
   SystemProgram,
   sendAndConfirmTransaction,
   TransactionInstruction,
+  SYSVAR_RENT_PUBKEY,
 } from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import fs from 'fs';
 import { serializeInstruction } from './serializer';
 const RPC_URL = process.env.SOLANA_RPC_URL ?? "https://api.devnet.solana.com";
@@ -132,6 +136,7 @@ function readMintedCount(data: Buffer): number {
   return Number(data.readBigUInt64LE(offset));
 }
 
+
 export async function mintNft(
   params: {
   kind?: string;
@@ -156,20 +161,28 @@ export async function mintNft(
   console.log("Mint:", mintKeypair.publicKey.toBase58());
 
   const data = serializeInstruction("MintNft", {
+    name: "Name",
+    symbol: "NFT",
+    uri: "String",
+    seller_fee_bps: 10,
     kind: params.kind ?? "Default",
     proxy_target: (params.proxyTarget ?? authority.publicKey).toBase58(),
     proxy_fee_bps: params.proxyFeeBps ?? 0,
     fraction_children: [],
   });
-
+  const metadataAccount = findMetadataPda(mintKeypair.publicKey);
   const instruction = new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      { pubkey: authority.publicKey,     isSigner: true,  isWritable: true  },
-      { pubkey: COLLECTION_ID,           isSigner: false, isWritable: true  },
-      { pubkey: nftPda,                  isSigner: false, isWritable: true  },
-      { pubkey: mintKeypair.publicKey,   isSigner: true,  isWritable: true  },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: authority.publicKey,        isSigner: true,  isWritable: true  },
+      { pubkey: COLLECTION_ID,              isSigner: false, isWritable: true  },
+      { pubkey: nftPda,                     isSigner: false, isWritable: true  },
+      { pubkey: mintKeypair.publicKey,      isSigner: true,  isWritable: true  },
+      { pubkey: metadataAccount,            isSigner: false, isWritable: true  }, // ← новый
+      { pubkey: METADATA_PROGRAM_ID,        isSigner: false, isWritable: false }, // ← новый
+      { pubkey: TOKEN_PROGRAM_ID,           isSigner: false, isWritable: false }, // ← новый
+      { pubkey: SystemProgram.programId,    isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY,         isSigner: false, isWritable: false }, // ← новый
     ],
     data,
   });

@@ -14,6 +14,7 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
     ClaimCloneRewards:    6,
     UpdateFractions:      7,
     AutoMint:             8,
+    BurnNft:              9,
   };
 
   const idx = variantMap[variant];
@@ -42,6 +43,28 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
   }
 
   if (variant === "MintNft") {
+ 
+    const nameBytes = Buffer.from(fields.name ?? "", "utf8");
+    const nameLen = Buffer.alloc(4);
+    nameLen.writeUInt32LE(nameBytes.length);
+    parts.push(nameLen);
+    parts.push(nameBytes);
+
+    const symbolBytes = Buffer.from(fields.symbol ?? "", "utf8");
+    const symbolLen = Buffer.alloc(4);
+    symbolLen.writeUInt32LE(symbolBytes.length);
+    parts.push(symbolLen);
+    parts.push(symbolBytes);
+
+    const uriBytes = Buffer.from(fields.uri ?? "", "utf8");
+    const uriLen = Buffer.alloc(4);
+    uriLen.writeUInt32LE(uriBytes.length);
+    parts.push(uriLen);
+    parts.push(uriBytes);
+
+    const sellerBps = Buffer.alloc(2);
+    sellerBps.writeUInt16LE(fields.seller_fee_bps ?? 0);
+    parts.push(sellerBps);
     // kind: u8 — индекс NftKind enum
     // Порядок ОБЯЗАН совпадать с enum NftKind в state.rs
     const kindMap: Record<string, number> = {
@@ -136,3 +159,5 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
 
   return Buffer.concat(parts);
 }
+
+//2fyiMYt7QzHQuNZe74VKXC8kBom1uu3rQnYbT86zFn4X

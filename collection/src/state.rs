@@ -103,4 +103,10 @@ pub struct NftState {
     // ── Статистика ──────────────────────────────────────────────────────
     pub total_received_lamports: u64,
     pub total_forwarded_lamports: u64,
+
+    // Новые поля для метаданных
+    name: String,
+    symbol: String,
+    uri: String,
+    seller_fee_bps: u16,
 }

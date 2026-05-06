@@ -25,6 +25,7 @@ pub enum NftError {
     #[error("SBT cannot be transferred")]  SbtNotTransferable,
     #[error("Transfer not allowed")]       TransferNotAllowed,
     #[error("Already burned")]             AlreadyBurned,
+    #[error("Storage is not empty, withdraw first")] StorageNotEmpty,
 }
 
 impl From<NftError> for ProgramError {
