@@ -8,6 +8,7 @@ pub enum NftInstruction {
     /// Initialize collection.
     /// Accounts: [authority(signer), collection_pda(writable), system_program]
     InitializeCollection {
+        collection_id: u64,
         total_supply: u64,
         uri_base: String,
         clone_reward_lamports: u64,

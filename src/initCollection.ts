@@ -11,7 +11,9 @@ import {
 } from "@solana/web3.js";
 import fs from 'fs';
 import { serializeInstruction } from './serializer';
+
 const RPC_URL = process.env.SOLANA_RPC_URL ?? "https://api.devnet.solana.com";
+
 const connection = new Connection(
   RPC_URL,
   "confirmed"
@@ -21,23 +23,19 @@ const authority = Keypair.fromSecretKey(
   Uint8Array.from(JSON.parse(fs.readFileSync("./wallet.json", "utf8")))
 );
 
-const METADA_PROGRAM_ID = new PublicKey(
-  "5hU8pdP9xcchEKuvFUxCAZEvwdaEmMjHwRwSA8kN5ChD"
-);
-
 const { programId: PROGRAM_ID_STR } = JSON.parse(
   fs.readFileSync("./program-id.json", "utf8")
 );
 
 const PROGRAM_ID = new PublicKey(PROGRAM_ID_STR);
 
-export const initCollection = async () => {
-  const { pda: collectionPda } = await findCollectionPda();
+export const initCollection = async (index: number) => {
+  const { pda: collectionPda } =  findCollectionPda(index);
 
   console.log("Collection PDA:", collectionPda.toBase58());
 
   const data = serializeInstruction("InitializeCollection", {
-    uriBase: "https://api.qr-mint.net/images/collections/cover_fb31395e-ac00-4567-a04d-597603e5ae53.webp",
+    uriBase: "https://harlequin-competitive-cattle-965.mypinata.cloud/ipfs/bafkreievfsqy6o6gkjof5xgsysruza7x7gd7habaw3zb4fkuzcgg3p74ji",
     clone_reward_lamports: 0,
     auto_mint_price_lamports: 0,
     total_supply: 1000,
@@ -61,12 +59,15 @@ export const initCollection = async () => {
   return collectionPda;
 };
 
-async function findCollectionPda() {
+function findCollectionPda(collectionId: number) {
+  const idBuf = Buffer.alloc(8);
+  idBuf.writeBigUInt64LE(BigInt(collectionId));
   const [pda, bump] = PublicKey.findProgramAddressSync(
-    [Buffer.from("collection"), authority.publicKey.toBuffer()],
-    PROGRAM_ID
+    [Buffer.from("collection"), authority.publicKey.toBuffer(), idBuf],
+    PROGRAM_ID,
   );
   return { pda, bump };
 };
 
-initCollection();
+initCollection(1);
+

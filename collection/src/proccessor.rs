@@ -32,10 +32,10 @@ pub fn process_instruction(
         .map_err(|_| ProgramError::InvalidInstructionData)?
     {
         NftInstruction::InitializeCollection {
-            total_supply, uri_base,
+            collection_id, total_supply, uri_base,
             clone_reward_lamports, auto_mint_price_lamports,
         } => process_init_collection(
-            program_id, accounts,
+            program_id, accounts, collection_id,
             total_supply, uri_base,
             clone_reward_lamports, auto_mint_price_lamports,
         ),
@@ -77,6 +77,7 @@ pub fn process_instruction(
 fn process_init_collection(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
+    collection_id: u64,
     total_supply: u64,
     uri_base: String,
     clone_reward_lamports: u64,
@@ -91,7 +92,7 @@ fn process_init_collection(
     require_program(&solana_program::system_program::id(), system_prog.key)?;
 
     let (pda, bump) = Pubkey::find_program_address(
-        &[b"collection", authority.key.as_ref()],
+        &[b"collection", authority.key.as_ref(), &collection_id.to_le_bytes()],
         program_id,
     );
     require_key(&pda, coll_pda.key, NftError::InvalidPda)?;
