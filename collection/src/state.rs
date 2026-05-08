@@ -18,6 +18,7 @@ use solana_program::pubkey::Pubkey;
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct CollectionState {
     pub authority: Pubkey,
+    pub collection_id: u64,
     pub total_supply: u64,
     pub minted_count: u64,
     pub uri_base: String,

@@ -5,6 +5,7 @@ use solana_program::{
     msg,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
+    program_pack::Pack,
     pubkey::Pubkey,
     rent::Rent,
     system_instruction,
@@ -99,6 +100,7 @@ fn process_init_collection(
 
     let state = CollectionState {
         authority: *authority.key,
+        collection_id,
         total_supply,
         minted_count: 0,
         uri_base,
@@ -109,7 +111,7 @@ fn process_init_collection(
     create_pda_account(
         program_id, authority, coll_pda, system_prog,
         &state.try_to_vec()?,
-        &[b"collection", authority.key.as_ref(), &[bump]],
+        &[b"collection", authority.key.as_ref(), &collection_id.to_le_bytes(), &[bump]],
     )
 }
 
@@ -142,6 +144,8 @@ fn process_mint_nft(
 
     require_signer(payer)?;
     require_program(&solana_program::system_program::id(), system_prog.key)?;
+    require_program(&METADATA_PROGRAM_ID, metadata_program.key)?;
+    require_program(&spl_token::id(), token_program.key)?;
     require_owned_by(coll_pda, program_id)?;
 
     if proxy_fee_bps > 5000 {
@@ -221,7 +225,22 @@ fn process_mint_nft(
         &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
     )?;
 
-    // 2. Инициализируем SPL Mint (decimals=0 = NFT)
+    // 2. Создаём аккаунт mint (должен быть system-owned до create_account)
+    //    и сразу делаем его token-owned.
+    let rent = Rent::get()?;
+    let mint_rent = rent.minimum_balance(spl_token::state::Mint::LEN);
+    invoke(
+        &system_instruction::create_account(
+            payer.key,
+            mint.key,
+            mint_rent,
+            spl_token::state::Mint::LEN as u64,
+            token_program.key,
+        ),
+        &[payer.clone(), mint.clone(), system_prog.clone()],
+    )?;
+
+    // 3. Инициализируем SPL Mint (decimals=0 = NFT)
     invoke(
         &spl_token::instruction::initialize_mint(
             token_program.key,
@@ -250,6 +269,27 @@ fn process_mint_nft(
         })
         .is_mutable(true)
         .instruction();
+
+    // 4. Создаём metadata account (Metaplex) с подписью PDA mint_authority/update_authority.
+    let nft_seeds: &[&[u8]] = &[
+        b"nft",
+        coll_pda.key.as_ref(),
+        &mint_index.to_le_bytes(),
+        &[bump],
+    ];
+    invoke_signed(
+        &metadata_ix,
+        &[
+            metadata_account.clone(),
+            mint.clone(),
+            nft_pda.clone(),   // mint_authority
+            payer.clone(),     // payer
+            nft_pda.clone(),   // update_authority
+            system_prog.clone(),
+            rent_sysvar.clone(),
+        ],
+        &[nft_seeds],
+    )?;
 
     coll.minted_count += 1;
     coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;

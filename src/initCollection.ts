@@ -35,6 +35,7 @@ export const initCollection = async (index: number) => {
   console.log("Collection PDA:", collectionPda.toBase58());
 
   const data = serializeInstruction("InitializeCollection", {
+    collection_id: index,
     uriBase: "https://harlequin-competitive-cattle-965.mypinata.cloud/ipfs/bafkreievfsqy6o6gkjof5xgsysruza7x7gd7habaw3zb4fkuzcgg3p74ji",
     clone_reward_lamports: 0,
     auto_mint_price_lamports: 0,

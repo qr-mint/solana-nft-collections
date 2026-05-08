@@ -16,7 +16,11 @@ pub enum NftInstruction {
     },
 
     /// Mint a new NFT state account.
-    /// Accounts: [payer(signer), collection_pda(writable), nft_pda(writable), mint, system_program]
+    /// Accounts:
+    /// [payer(signer), collection_pda(writable), nft_pda(writable),
+    ///  mint(signer,writable), metadata_account(writable),
+    ///  metadata_program, token_program,
+    ///  system_program, rent_sysvar]
     MintNft {
         name: String,
         symbol: String,

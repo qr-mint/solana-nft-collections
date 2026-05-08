@@ -132,7 +132,12 @@ function findMetadataPda(mintPubkey: PublicKey) {
 
 
 function readMintedCount(data: Buffer): number {
-  const offset = 32 + 8; // после authority и total_supply
+  // CollectionState (borsh) layout in rust:
+  // authority: Pubkey (32)
+  // collection_id: u64 (8)
+  // total_supply: u64 (8)
+  // minted_count: u64 (8)
+  const offset = 32 + 8 + 8;
   return Number(data.readBigUInt64LE(offset));
 }
 
@@ -143,7 +148,7 @@ export async function mintNft(
   proxyTarget?: PublicKey;
   proxyFeeBps?: number;
 }) {
-  const COLLECTION_ID = new PublicKey('8i7jTZe9De7cBsMGBEhYFHYP31uaBFD76SnEY5ehkFzk');
+  const COLLECTION_ID = new PublicKey('14G2tnoNSnf3PNwZAKNNmXuiVFvyoXt96nmEkm9XS1Cj');
   console.log(COLLECTION_ID, 'collectionPda')
   // Читаем текущий mintIndex с блокчейна
   const collectionAccount = await connection.getAccountInfo(COLLECTION_ID);
@@ -163,7 +168,7 @@ export async function mintNft(
   const data = serializeInstruction("MintNft", {
     name: "Name",
     symbol: "NFT",
-    uri: "String",
+    uri: "https://harlequin-competitive-cattle-965.mypinata.cloud/ipfs/bafkreievfsqy6o6gkjof5xgsysruza7x7gd7habaw3zb4fkuzcgg3p74ji",
     seller_fee_bps: 10,
     kind: params.kind ?? "Default",
     proxy_target: (params.proxyTarget ?? authority.publicKey).toBase58(),

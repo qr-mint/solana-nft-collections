@@ -23,6 +23,10 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
   parts.push(Buffer.from([idx]));
 
   if (variant === "InitializeCollection") {
+    const collection_id = Buffer.alloc(8);
+    collection_id.writeBigUInt64LE(BigInt(fields.collection_id ?? 0));
+    parts.push(collection_id);
+
     const totalSupply = Buffer.alloc(8);
     totalSupply.writeBigUInt64LE(BigInt(fields.total_supply ?? 0));
     parts.push(totalSupply);
