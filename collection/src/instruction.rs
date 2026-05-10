@@ -66,4 +66,17 @@ pub enum NftInstruction {
     },
 
     BurnNft,
+
+    UpdateNft {
+        // Что хотим обновить (Option = необязательно)
+        name: Option<String>,
+        symbol: Option<String>,
+        uri: Option<String>,
+        seller_fee_bps: Option<u16>,
+        // Финансовые параметры
+        proxy_target: Option<Pubkey>,
+        proxy_fee_bps: Option<u16>,
+    },
+
+    TransferCollection { new_authority: Pubkey },
 }

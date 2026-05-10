@@ -15,6 +15,8 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
     AutoMint:             7,
     Transfer:             8,
     BurnNft:              9,
+    UpdateNft:            10,
+    TransferCollection:   11,
   };
 
   const idx = variantMap[variant];
@@ -155,9 +157,81 @@ export function serializeInstruction(variant: string, fields: any = {}): Buffer 
     parts.push(new PublicKey(fields.new_proxy_target).toBuffer());
   }
 
+  if (variant === "UpdateNft") {
+    // Каждое поле: bool (есть/нет) + значение если есть
+  
+    // name: Option<String>
+    if (fields.name !== undefined) {
+      parts.push(Buffer.from([1])); // Some
+      const bytes = Buffer.from(fields.name, "utf8");
+      const len = Buffer.alloc(4);
+      len.writeUInt32LE(bytes.length);
+      parts.push(len);
+      parts.push(bytes);
+    } else {
+      parts.push(Buffer.from([0])); // None
+    }
+  
+    // symbol: Option<String>
+    if (fields.symbol !== undefined) {
+      parts.push(Buffer.from([1]));
+      const bytes = Buffer.from(fields.symbol, "utf8");
+      const len = Buffer.alloc(4);
+      len.writeUInt32LE(bytes.length);
+      parts.push(len);
+      parts.push(bytes);
+    } else {
+      parts.push(Buffer.from([0]));
+    }
+  
+    // uri: Option<String>
+    if (fields.uri !== undefined) {
+      parts.push(Buffer.from([1]));
+      const bytes = Buffer.from(fields.uri, "utf8");
+      const len = Buffer.alloc(4);
+      len.writeUInt32LE(bytes.length);
+      parts.push(len);
+      parts.push(bytes);
+    } else {
+      parts.push(Buffer.from([0]));
+    }
+  
+    // seller_fee_bps: Option<u16>
+    if (fields.seller_fee_bps !== undefined) {
+      parts.push(Buffer.from([1]));
+      const bps = Buffer.alloc(2);
+      bps.writeUInt16LE(fields.seller_fee_bps);
+      parts.push(bps);
+    } else {
+      parts.push(Buffer.from([0]));
+    }
+  
+    // proxy_target: Option<Pubkey>
+    if (fields.proxy_target !== undefined) {
+      parts.push(Buffer.from([1]));
+      parts.push(new PublicKey(fields.proxy_target).toBuffer());
+    } else {
+      parts.push(Buffer.from([0]));
+    }
+  
+    // proxy_fee_bps: Option<u16>
+    if (fields.proxy_fee_bps !== undefined) {
+      parts.push(Buffer.from([1]));
+      const bps = Buffer.alloc(2);
+      bps.writeUInt16LE(fields.proxy_fee_bps);
+      parts.push(bps);
+    } else {
+      parts.push(Buffer.from([0]));
+    }
+  }
+
   if (variant === "TransferNft") {
     // Pubkey = 32 байта
     parts.push(fields.newOwner.toBuffer());
+  }
+
+  if (variant === "TransferCollection") {
+    parts.push(new PublicKey(fields.new_authority).toBuffer());
   }
   // ProxyForward, ClaimCloneRewards — только индекс, нет полей
 

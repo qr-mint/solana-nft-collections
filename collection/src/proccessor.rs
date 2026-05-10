@@ -20,7 +20,9 @@ use crate::{
 
 use mpl_token_metadata::{
     instructions::CreateMetadataAccountV3Builder,
+    instructions::UpdateV1Builder,
     types::DataV2,
+    types::Data,
     ID as METADATA_PROGRAM_ID,
 };
 
@@ -67,6 +69,12 @@ pub fn process_instruction(
 
         NftInstruction::BurnNft =>
             process_burn_nft(program_id, accounts),
+        
+        NftInstruction::UpdateNft { name, symbol, uri, seller_fee_bps, proxy_target, proxy_fee_bps } =>
+            process_update_nft(program_id, accounts, name, symbol, uri, seller_fee_bps, proxy_target, proxy_fee_bps),
+        
+        NftInstruction::TransferCollection { new_authority } =>
+            process_transfer_collection(program_id, accounts, new_authority),
             
     }
 }
@@ -1066,3 +1074,115 @@ fn process_burn_nft(
     Ok(())
 }
 
+
+fn process_update_nft(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    name: Option<String>,
+    symbol: Option<String>,
+    uri: Option<String>,
+    seller_fee_bps: Option<u16>,
+    proxy_target: Option<Pubkey>,
+    proxy_fee_bps: Option<u16>,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let authority         = next_account_info(iter)?;
+    let nft_pda           = next_account_info(iter)?;
+    let metadata_account  = next_account_info(iter)?;
+    let metadata_program  = next_account_info(iter)?;
+    let coll_pda          = next_account_info(iter)?;
+
+    require_signer(authority)?;
+
+    let mut nft = NftState::try_from_slice(&nft_pda.data.borrow())?;
+    let coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
+
+    // Только owner или collection authority может обновлять
+    if coll.authority != *authority.key {
+        return Err(NftError::Unauthorized.into());
+    }
+    if nft.is_burned {
+        return Err(NftError::AlreadyBurned.into());
+    }
+
+    let should_update_metadata = name.is_some() 
+        || symbol.is_some() 
+        || uri.is_some() 
+        || seller_fee_bps.is_some();
+
+    // Обновляем NftState
+    if let Some(v) = name        { nft.name = v; }
+    if let Some(v) = symbol      { nft.symbol = v; }
+    if let Some(v) = uri         { nft.uri = v; }
+    if let Some(v) = seller_fee_bps { nft.seller_fee_bps = v; }
+    if let Some(v) = proxy_target { nft.proxy_target = v; }
+    if let Some(v) = proxy_fee_bps {
+        if v > 5000 { return Err(NftError::FeeTooHigh.into()); }
+        nft.proxy_fee_bps = v;
+    }
+
+    nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
+
+    // Обновляем Metaplex метаданные (если меняли name/symbol/uri)
+    if should_update_metadata {
+        let (_, bump) = Pubkey::find_program_address(
+            &[b"nft", nft.collection.as_ref(), &nft.mint_index.to_le_bytes()],
+            program_id,
+        );
+
+        let update_ix = UpdateV1Builder::new()
+            .metadata(*metadata_account.key)
+            .authority(*nft_pda.key)
+            .data(Data {
+                name: nft.name.clone(),
+                symbol: nft.symbol.clone(),
+                uri: nft.uri.clone(),
+                seller_fee_basis_points: nft.seller_fee_bps,
+                creators: None,
+            })
+            .instruction();
+
+        invoke_signed(
+            &update_ix,
+            &[
+                metadata_account.clone(),
+                nft_pda.clone(),
+                metadata_program.clone(),
+            ],
+            &[&[
+                b"nft",
+                nft.collection.as_ref(),
+                &nft.mint_index.to_le_bytes(),
+                &[bump],
+            ]],
+        )?;
+    }
+
+    msg!("NFT #{} updated", nft.mint_index);
+    Ok(())
+}
+
+fn process_transfer_collection(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    new_authority: Pubkey,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let authority = next_account_info(iter)?;
+    let coll_pda  = next_account_info(iter)?;
+
+    require_signer(authority)?;
+    require_owned_by(coll_pda, program_id)?;
+
+    let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
+
+    if coll.authority != *authority.key {
+        return Err(NftError::Unauthorized.into());
+    }
+
+    coll.authority = new_authority;
+    coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
+
+    msg!("Collection authority transferred to {}", new_authority);
+    Ok(())
+}
