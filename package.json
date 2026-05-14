@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "cargo build-sbf --manifest-path ./collection/Cargo.toml",
-    "deploy": "tsx src/deployCollection.ts"
+    "deploy": "tsx src/deployCollection.ts",
+    "create-wallet": "solana-keygen new --outfile wallet.json",
+    "show-wallet": "solana-keygen pubkey wallet.json"
   },
   "dependencies": {
     "@solana/web3.js": "^1.91.8",
