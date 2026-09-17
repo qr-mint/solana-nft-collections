@@ -11,6 +11,7 @@ use solana_program::{
     system_instruction,
     sysvar::Sysvar,
 };
+use spl_token::state::Account as TokenAccount;
 
 use crate::{
     error::NftError,
@@ -25,7 +26,7 @@ use mpl_token_metadata::{
     types::Data,
     ID as METADATA_PROGRAM_ID,
 };
-
+use spl_associated_token_account::instruction::create_associated_token_account;
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -49,11 +50,11 @@ pub fn process_instruction(
         NftInstruction::ProxyForward =>
             process_proxy_forward(program_id, accounts),
 
-        NftInstruction::Withdraw { amount_lamports } =>
-            process_withdraw(program_id, accounts, amount_lamports),
+        NftInstruction::Withdraw {} =>
+            process_withdraw(program_id, accounts),
 
-        NftInstruction::WithdrawTokens { amount } =>
-            process_withdraw_tokens(program_id, accounts, amount),
+        NftInstruction::WithdrawTokens {} =>
+            process_withdraw_tokens(program_id, accounts),
 
         NftInstruction::ClaimCloneRewards =>
             process_claim_clone_rewards(program_id, accounts),
@@ -140,15 +141,18 @@ fn process_mint_nft(
     fraction_children_raw: Vec<(Pubkey, u16)>,
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
-    let payer       = next_account_info(iter)?;
-    let coll_pda    = next_account_info(iter)?;
-    let nft_pda     = next_account_info(iter)?;
-    let mint        = next_account_info(iter)?;
-    let metadata_account = next_account_info(iter)?; // ← добавили
-    let metadata_program = next_account_info(iter)?; // ← добавили
-    let token_program    = next_account_info(iter)?; // ← добавили
+    let payer            = next_account_info(iter)?;
+    let coll_pda         = next_account_info(iter)?;
+    let nft_pda          = next_account_info(iter)?;
+    let mint             = next_account_info(iter)?;
+    let token_account    = next_account_info(iter)?;
+    let owner            = next_account_info(iter)?;
+    let metadata_account = next_account_info(iter)?;
+    let metadata_program = next_account_info(iter)?;
+    let token_program    = next_account_info(iter)?;
+    let ata_program      = next_account_info(iter)?;
     let system_prog      = next_account_info(iter)?;
-    let rent_sysvar      = next_account_info(iter)?; // ← добавили
+    let rent_sysvar      = next_account_info(iter)?;
 
     require_signer(payer)?;
     require_program(&solana_program::system_program::id(), system_prog.key)?;
@@ -160,7 +164,6 @@ fn process_mint_nft(
         return Err(NftError::FeeTooHigh.into());
     }
 
-    // Валидация fraction: сумма <= 10000, остаток идёт на proxy_target
     if kind == NftKind::AddressV4Fraction {
         let total: u32 = fraction_children_raw.iter().map(|(_, s)| *s as u32).sum();
         if total > 10000 {
@@ -183,17 +186,12 @@ fn process_mint_nft(
     );
     require_key(&pda_key, nft_pda.key, NftError::InvalidPda)?;
 
-    // fee_recipient:
-    //   Address  → collection authority (авторы зарабатывают)
-    //   AddressV5 / AddressV6 → owner NFT (владелец зарабатывает)
-    //   остальные → не используется, ставим authority
     let fee_recipient = match kind {
         NftKind::Address | NftKind::AddressV6 => coll.authority,
         NftKind::AddressV5 => *payer.key,
         _ => coll.authority,
     };
 
-    // can_fraction: только оригинальный V4Fraction может дробиться
     let can_fraction = kind == NftKind::AddressV4Fraction;
 
     let fraction_children = fraction_children_raw
@@ -205,11 +203,11 @@ fn process_mint_nft(
         name: name.clone(),
         symbol: symbol.clone(),
         uri: uri.clone(),
-        seller_fee_bps: seller_fee_bps,
+        seller_fee_bps,
         kind,
         collection: *coll_pda.key,
         mint: *mint.key,
-        owner: *payer.key,
+        owner: *owner.key, // ← владелец, не payer
         mint_index,
         is_burned: false,
         proxy_target,
@@ -226,6 +224,14 @@ fn process_mint_nft(
         total_forwarded_lamports: 0,
     };
 
+    // Объявляем seeds первым — используется во всех invoke_signed ниже
+    let nft_seeds: &[&[u8]] = &[
+        b"nft",
+        coll_pda.key.as_ref(),
+        &mint_index.to_le_bytes(),
+        &[bump],
+    ];
+
     // 1. Создаём PDA аккаунт NftState
     create_pda_account(
         program_id, payer, nft_pda, system_prog,
@@ -233,8 +239,7 @@ fn process_mint_nft(
         &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
     )?;
 
-    // 2. Создаём аккаунт mint (должен быть system-owned до create_account)
-    //    и сразу делаем его token-owned.
+    // 2. Создаём аккаунт mint
     let rent = Rent::get()?;
     let mint_rent = rent.minimum_balance(spl_token::state::Mint::LEN);
     invoke(
@@ -253,13 +258,14 @@ fn process_mint_nft(
         &spl_token::instruction::initialize_mint(
             token_program.key,
             mint.key,
-            nft_pda.key,
+            nft_pda.key,  // mint_authority = наш PDA
             None,
             0,
         )?,
         &[mint.clone(), rent_sysvar.clone(), token_program.clone()],
     )?;
 
+    // 4. Создаём Metadata (пока mint_authority ещё активен!)
     let metadata_ix = CreateMetadataAccountV3Builder::new()
         .metadata(*metadata_account.key)
         .mint(*mint.key)
@@ -278,31 +284,78 @@ fn process_mint_nft(
         .is_mutable(true)
         .instruction();
 
-    // 4. Создаём metadata account (Metaplex) с подписью PDA mint_authority/update_authority.
-    let nft_seeds: &[&[u8]] = &[
-        b"nft",
-        coll_pda.key.as_ref(),
-        &mint_index.to_le_bytes(),
-        &[bump],
-    ];
     invoke_signed(
         &metadata_ix,
         &[
             metadata_account.clone(),
             mint.clone(),
-            nft_pda.clone(),   // mint_authority
-            payer.clone(),     // payer
-            nft_pda.clone(),   // update_authority
+            nft_pda.clone(),     // mint_authority
+            payer.clone(),       // payer
+            nft_pda.clone(),     // update_authority
             system_prog.clone(),
             rent_sysvar.clone(),
+            metadata_program.clone(),
         ],
         &[nft_seeds],
     )?;
 
+    // 5. Создаём ATA для владельца
+    invoke(
+        &spl_associated_token_account::instruction::create_associated_token_account(
+            payer.key,
+            owner.key,
+            mint.key,
+            token_program.key,
+        ),
+        &[
+            payer.clone(),
+            token_account.clone(),
+            owner.clone(),
+            mint.clone(),
+            system_prog.clone(),
+            token_program.clone(),
+            ata_program.clone(),
+        ],
+    )?;
+
+    // 6. Минтим 1 токен на ATA владельца
+    invoke_signed(
+        &spl_token::instruction::mint_to(
+            token_program.key,
+            mint.key,
+            token_account.key,
+            nft_pda.key,
+            &[],
+            1,
+        )?,
+        &[
+            mint.clone(),
+            token_account.clone(),
+            nft_pda.clone(),
+            token_program.clone(),
+        ],
+        &[nft_seeds],
+    )?;
+
+    // 7. Отзываем mint authority (последним!)
+    invoke_signed(
+        &spl_token::instruction::set_authority(
+            token_program.key,
+            mint.key,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            nft_pda.key,
+            &[],
+        )?,
+        &[mint.clone(), nft_pda.clone(), token_program.clone()],
+        &[nft_seeds],
+    )?;
+
+    // 8. Обновляем счётчик коллекции
     coll.minted_count += 1;
     coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
 
-    msg!("Minted NFT #{} kind={:?} proxy_target={}", mint_index, state.kind, proxy_target);
+    msg!("Minted NFT #{} kind={:?} owner={} proxy_target={}", mint_index, state.kind, owner.key, proxy_target);
     Ok(())
 }
 
@@ -464,7 +517,6 @@ fn process_fraction_forward<'a>(
 fn process_withdraw(
     _program_id: &Pubkey,
     accounts: &[AccountInfo],
-    amount_lamports: u64,
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
     let owner       = next_account_info(iter)?;
@@ -489,25 +541,24 @@ fn process_withdraw(
     let min_balance = rent.minimum_balance(nft_pda.data_len());
     let available = nft_pda.lamports().saturating_sub(min_balance);
 
-    if amount_lamports > available {
-        return Err(NftError::InsufficientFunds.into());
+    if available == 0 {
+        return Err(NftError::NothingToForward.into()); // или свой NftError::NothingToWithdraw
     }
 
-    **nft_pda.try_borrow_mut_lamports()? -= amount_lamports;
-    **destination.try_borrow_mut_lamports()? += amount_lamports;
+    **nft_pda.try_borrow_mut_lamports()? -= available;
+    **destination.try_borrow_mut_lamports()? += available;
 
     nft.total_forwarded_lamports =
-        nft.total_forwarded_lamports.saturating_add(amount_lamports);
+        nft.total_forwarded_lamports.saturating_add(available);
     nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
 
-    msg!("Withdraw {} lamports from {:?} storage", amount_lamports, nft.kind);
+    msg!("Withdraw ALL ({} lamports) from {:?} storage", available, nft.kind);
     Ok(())
 }
 
 fn process_withdraw_tokens(
     _program_id: &Pubkey,
     accounts: &[AccountInfo],
-    amount: u64,
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
     let owner       = next_account_info(iter)?;
@@ -527,8 +578,13 @@ fn process_withdraw_tokens(
         return Err(NftError::NotOwner.into());
     }
 
-    // CPI → SPL Token transfer
-    // nft_pda — authority над src_token аккаунтом
+    // Читаем реальный баланс src_token, чтобы забрать всё
+    let amount = TokenAccount::unpack(&src_token.data.borrow())?.amount;
+
+    if amount == 0 {
+        return Err(NftError::NothingToForward.into()); // или свой NftError::NothingToWithdraw
+    }
+
     let (_, bump) = Pubkey::find_program_address(
         &[b"nft", nft.collection.as_ref(), &nft.mint_index.to_le_bytes()],
         _program_id,
@@ -547,7 +603,7 @@ fn process_withdraw_tokens(
         &[&[b"nft", nft.collection.as_ref(), &nft.mint_index.to_le_bytes(), &[bump]]],
     )?;
 
-    msg!("WithdrawTokens {} from V3j storage", amount);
+    msg!("WithdrawTokens ALL ({}) from V3j storage", amount);
     Ok(())
 }
 
@@ -959,6 +1015,13 @@ fn process_transfer(
     let owner = next_account_info(accounts_iter)?;
     let nft_pda = next_account_info(accounts_iter)?;
     let collection_pda = next_account_info(accounts_iter)?;
+    let mint               = next_account_info(accounts_iter)?;
+    let from_token_account = next_account_info(accounts_iter)?;
+    let to_token_account   = next_account_info(accounts_iter)?;
+    let new_owner_info     = next_account_info(accounts_iter)?;
+    let token_program      = next_account_info(accounts_iter)?;
+    let ata_program        = next_account_info(accounts_iter)?;
+    let system_prog        = next_account_info(accounts_iter)?;
 
     if !owner.is_signer {
         return Err(NftError::Unauthorized.into());
@@ -981,6 +1044,46 @@ fn process_transfer(
     if nft.kind == NftKind::Clone || nft.kind == NftKind::CloneV2 {
         return process_clone_nft(program_id, accounts, new_owner);
     }
+    require_program(&spl_token::id(), token_program.key)?;
+
+     // Создаём ATA для нового владельца если не существует
+     if to_token_account.lamports() == 0 {
+        invoke(
+            &spl_associated_token_account::instruction::create_associated_token_account(
+                owner.key,          // плательщик
+                new_owner_info.key, // владелец
+                mint.key,
+                token_program.key,
+            ),
+            &[
+                owner.clone(),
+                to_token_account.clone(),
+                new_owner_info.clone(),
+                mint.clone(),
+                system_prog.clone(),
+                token_program.clone(),
+                ata_program.clone(),
+            ],
+        )?;
+    }
+
+    // Переносим токен
+    invoke(
+        &spl_token::instruction::transfer(
+            token_program.key,
+            from_token_account.key,
+            to_token_account.key,
+            owner.key,
+            &[],
+            1,
+        )?,
+        &[
+            from_token_account.clone(),
+            to_token_account.clone(),
+            owner.clone(),
+            token_program.clone(),
+        ],
+    )?;
 
     nft.owner = new_owner;
     nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
@@ -994,31 +1097,28 @@ fn process_burn_nft(
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
-    let owner       = next_account_info(iter)?;
-    let nft_pda     = next_account_info(iter)?;
-    let coll_pda    = next_account_info(iter)?;
-    let mint        = next_account_info(iter)?;
+    let owner         = next_account_info(iter)?;
+    let nft_pda       = next_account_info(iter)?;
+    let coll_pda      = next_account_info(iter)?;
+    let mint          = next_account_info(iter)?;
     let token_account = next_account_info(iter)?;
     let token_program = next_account_info(iter)?;
 
     require_signer(owner)?;
+    require_program(&spl_token::id(), token_program.key)?;
 
     let mut nft = NftState::try_from_slice(&nft_pda.data.borrow())?;
 
-    // Проверки
     if nft.owner != *owner.key {
         return Err(NftError::NotOwner.into());
     }
     if nft.is_burned {
         return Err(NftError::AlreadyBurned.into());
     }
-
-    // SBT нельзя сжигать
     if nft.kind == NftKind::SBT {
         return Err(NftError::SbtNotTransferable.into());
     }
 
-    // Нельзя сжечь если на хранилище есть средства (V3, V3j, V4Fraction)
     match nft.kind {
         NftKind::AddressV3 | NftKind::AddressV3j | NftKind::AddressV4Fraction => {
             let rent = Rent::get()?;
@@ -1031,41 +1131,46 @@ fn process_burn_nft(
         _ => {}
     }
 
-    // 1. Сжигаем SPL токен через CPI
-    let (_, bump) = Pubkey::find_program_address(
-        &[b"nft", nft.collection.as_ref(), &nft.mint_index.to_le_bytes()],
-        program_id,
-    );
-
-    invoke_signed(
+    // 1. Сжигаем SPL токен — authority это owner, не PDA
+    invoke(
         &spl_token::instruction::burn(
             token_program.key,
             token_account.key,
             mint.key,
-            nft_pda.key, // authority
+            owner.key, // ← владелец подписывает, не PDA
             &[],
-            1,           // amount = 1 (NFT)
+            1,
         )?,
         &[
             token_account.clone(),
             mint.clone(),
-            nft_pda.clone(),
+            owner.clone(), // ← owner как signer
             token_program.clone(),
         ],
-        &[&[
-            b"nft",
-            nft.collection.as_ref(),
-            &nft.mint_index.to_le_bytes(),
-            &[bump],
-        ]],
     )?;
 
-    // 2. Помечаем NFT как сожжённый в state
+    // 2. Закрываем token account и возвращаем rent владельцу
+    invoke(
+        &spl_token::instruction::close_account(
+            token_program.key,
+            token_account.key,
+            owner.key,  // rent получатель
+            owner.key,  // authority
+            &[],
+        )?,
+        &[
+            token_account.clone(),
+            owner.clone(),
+            token_program.clone(),
+        ],
+    )?;
+
+    // 3. Помечаем как сожжённый
     nft.is_burned = true;
-    nft.owner = Pubkey::default(); // обнуляем владельца
+    nft.owner = Pubkey::default();
     nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
 
-    // 3. Возвращаем rent владельцу (закрываем PDA аккаунт)
+    // 4. Возвращаем rent от PDA владельцу
     let nft_lamports = nft_pda.lamports();
     **nft_pda.try_borrow_mut_lamports()? = 0;
     **owner.try_borrow_mut_lamports()? += nft_lamports;

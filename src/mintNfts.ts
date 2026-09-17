@@ -11,8 +11,11 @@ import {
   SYSVAR_RENT_PUBKEY,
 } from "@solana/web3.js";
 import {
+  getAssociatedTokenAddress,
   TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
 } from "@solana/spl-token";
+
 import fs from 'fs';
 import { serializeInstruction } from './serializer';
 const RPC_URL = process.env.SOLANA_RPC_URL ?? "https://api.devnet.solana.com";
@@ -35,7 +38,7 @@ const { programId: PROGRAM_ID_STR } = JSON.parse(
 
 const PROGRAM_ID = new PublicKey(PROGRAM_ID_STR);
 
-
+//FwCZNL2fPA64JneiAiZWsofbZ9eM8MUDo4vtX26RE256 2
 
 // ──────────────────────────────────────────
 // Хелпер: вычислить PDA (детерминированный адрес)
@@ -148,8 +151,18 @@ export async function mintNft(
   proxyTarget?: PublicKey;
   proxyFeeBps?: number;
 }) {
-  const COLLECTION_ID = new PublicKey('14G2tnoNSnf3PNwZAKNNmXuiVFvyoXt96nmEkm9XS1Cj');
+  const COLLECTION_ID = new PublicKey('FwCZNL2fPA64JneiAiZWsofbZ9eM8MUDo4vtX26RE256');
   console.log(COLLECTION_ID, 'collectionPda')
+  const mintKeypair = Keypair.generate();
+
+  const ownerPubkey = authority.publicKey;
+
+  // ATA для владельца
+  const tokenAccount = await getAssociatedTokenAddress(
+    mintKeypair.publicKey,
+    ownerPubkey,
+  );
+  
   // Читаем текущий mintIndex с блокчейна
   const collectionAccount = await connection.getAccountInfo(COLLECTION_ID);
   if (!collectionAccount) throw new Error("Collection не найдена");
@@ -158,9 +171,6 @@ export async function mintNft(
   console.log("Mint index:", mintIndex);
 
   const { pda: nftPda } = findNftPda(COLLECTION_ID, mintIndex);
-
-  // Новый mint keypair для этого NFT
-  const mintKeypair = Keypair.generate();
 
   console.log("NFT PDA:", nftPda.toBase58());
   console.log("Mint:", mintKeypair.publicKey.toBase58());
@@ -179,15 +189,19 @@ export async function mintNft(
   const instruction = new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
+      
       { pubkey: authority.publicKey,        isSigner: true,  isWritable: true  },
       { pubkey: COLLECTION_ID,              isSigner: false, isWritable: true  },
       { pubkey: nftPda,                     isSigner: false, isWritable: true  },
       { pubkey: mintKeypair.publicKey,      isSigner: true,  isWritable: true  },
-      { pubkey: metadataAccount,            isSigner: false, isWritable: true  }, // ← новый
-      { pubkey: METADATA_PROGRAM_ID,        isSigner: false, isWritable: false }, // ← новый
-      { pubkey: TOKEN_PROGRAM_ID,           isSigner: false, isWritable: false }, // ← новый
+      { pubkey: tokenAccount,               isSigner: false, isWritable: true  }, 
+      { pubkey: ownerPubkey,                isSigner: false, isWritable: false },
+      { pubkey: metadataAccount,            isSigner: false, isWritable: true  },
+      { pubkey: METADATA_PROGRAM_ID,        isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID,           isSigner: false, isWritable: false },
+      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID,isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId,    isSigner: false, isWritable: false },
-      { pubkey: SYSVAR_RENT_PUBKEY,         isSigner: false, isWritable: false }, // ← новый
+      { pubkey: SYSVAR_RENT_PUBKEY,         isSigner: false, isWritable: false },
     ],
     data,
   });

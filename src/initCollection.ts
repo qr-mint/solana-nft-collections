@@ -70,5 +70,5 @@ function findCollectionPda(collectionId: number) {
   return { pda, bump };
 };
 
-initCollection(1);
+initCollection(2);
 
