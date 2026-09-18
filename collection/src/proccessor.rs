@@ -50,10 +50,10 @@ pub fn process_instruction(
         NftInstruction::ProxyForward =>
             process_proxy_forward(program_id, accounts),
 
-        NftInstruction::Withdraw {} =>
+        NftInstruction::Withdraw =>
             process_withdraw(program_id, accounts),
 
-        NftInstruction::WithdrawTokens {} =>
+        NftInstruction::WithdrawTokens =>
             process_withdraw_tokens(program_id, accounts),
 
         NftInstruction::ClaimCloneRewards =>

@@ -38,11 +38,11 @@ pub enum NftInstruction {
 
     /// Withdraw lamports from V3/V3j storage.
     /// Accounts: [owner(signer), nft_pda(writable), destination(writable), system_program]
-    Withdraw {},
+    Withdraw,
 
     /// Withdraw SPL tokens from V3j storage.
     /// Accounts: [owner(signer), nft_pda, src_token, dst_token, token_program]
-    WithdrawTokens {},
+    WithdrawTokens,
 
     /// Claim pending clone rewards from collection treasury.
     /// Accounts: [owner(signer), nft_pda(writable), collection_pda(writable), wallet(writable)]
