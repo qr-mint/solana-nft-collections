@@ -44,8 +44,8 @@ pub fn process_instruction(
             clone_reward_lamports, auto_mint_price_lamports,
         ),
        
-        NftInstruction::MintNft { name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children } =>
-            process_mint_nft(program_id, accounts, name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children),
+        NftInstruction::MintNft { name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children, parent_fraction } =>
+            process_mint_nft(program_id, accounts, name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children, parent_fraction),
 
         NftInstruction::ProxyForward =>
             process_proxy_forward(program_id, accounts),
@@ -139,6 +139,7 @@ fn process_mint_nft(
     proxy_target: Pubkey,
     proxy_fee_bps: u16,
     fraction_children_raw: Vec<(Pubkey, u16)>,
+    parent_fraction: Option<(Pubkey, u16)>,   // ← NEW
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
     let payer            = next_account_info(iter)?;
@@ -153,6 +154,7 @@ fn process_mint_nft(
     let ata_program      = next_account_info(iter)?;
     let system_prog      = next_account_info(iter)?;
     let rent_sysvar      = next_account_info(iter)?;
+    let parent_pda_opt   = next_account_info(iter).ok();   // ← OPTIONAL
 
     require_signer(payer)?;
     require_program(&solana_program::system_program::id(), system_prog.key)?;
@@ -238,6 +240,44 @@ fn process_mint_nft(
         &state.try_to_vec()?,
         &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
     )?;
+
+    if let Some((parent_key, share_bps)) = parent_fraction {
+         // Родитель должен быть передан в аккаунтах
+        let parent_pda = parent_pda_opt
+            .ok_or(NftError::MissingParentAccount)?;
+
+        // Проверки
+        require_key(&parent_key, parent_pda.key, NftError::InvalidPda)?;
+        require_owned_by(parent_pda, program_id)?;
+        // 1. Проверяем родителя
+        let mut parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
+        if parent.kind != NftKind::AddressV4Fraction {
+            return Err(NftError::WrongNftKind.into());
+        }
+        if !parent.can_fraction {
+            return Err(NftError::CannotFraction.into());
+        }
+        if parent.owner != *payer.key {
+            return Err(NftError::NotOwner.into());
+        }
+        if parent.fraction_children.len() >= 8 {
+            return Err(NftError::TooManyFractions.into());
+        }
+
+        // 2. Считаем суммарный bps
+        let total: u32 = parent.fraction_children.iter()
+            .map(|c| c.share_bps as u32).sum::<u32>() + share_bps as u32;
+        if total > 10000 {
+            return Err(NftError::InvalidFractions.into());
+        }
+
+        // 3. Добавляем
+        parent.fraction_children.push(FractionChild {
+            child_nft_pda: *nft_pda.key,
+            share_bps,
+        });
+        parent.serialize(&mut *parent_pda.try_borrow_mut_data()?)?;
+    }
 
     // 2. Создаём аккаунт mint
     let rent = Rent::get()?;

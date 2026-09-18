@@ -25,9 +25,22 @@ export const deployProgram = (): PublicKey => {
     console.log("Generating program keypair...");
     execSync(`solana-keygen new --outfile ${keypairPath} --no-bip39-passphrase`);
   }
-
+  try {
+    const PROGRAM_ID = "5hU8pdP9xcchEKuvFUxCAZEvwdaEmMjHwRwSA8kN5ChD";
+    console.log("Extending program account...");
+    execSync(
+      `solana program extend ${PROGRAM_ID} 40960 \
+       --keypair ${walletPath} \
+       --url ${RPC_URL}`,
+      { encoding: "utf8" }
+    );
+    console.log("Program account extended!");
+  } catch (e) {
+    // Игнорируем если уже достаточно места
+    console.log("Extend skipped (enough space or new program)");
+  }
   console.log("Deploying program via Solana CLI...");
-
+  
   // Деплой через CLI
   const output = execSync(
     `solana program deploy ${soPath} \

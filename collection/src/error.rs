@@ -26,6 +26,19 @@ pub enum NftError {
     #[error("Transfer not allowed")]       TransferNotAllowed,
     #[error("Already burned")]             AlreadyBurned,
     #[error("Storage is not empty, withdraw first")] StorageNotEmpty,
+
+    #[error("Missing parent account")]
+    MissingParentAccount,
+
+    #[error("Self reference")]
+    SelfReference,
+
+    #[error("Collection mismatch")]
+    CollectionMismatch,
+
+    #[error("Duplicate fraction child")]
+    DuplicateFractionChild,
+
 }
 
 impl From<NftError> for ProgramError {
