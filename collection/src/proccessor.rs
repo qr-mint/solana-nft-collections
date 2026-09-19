@@ -593,7 +593,7 @@ fn process_proxy_forward(
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
-    let _caller      = next_account_info(iter)?;
+    let caller      = next_account_info(iter)?;
     let nft_pda      = next_account_info(iter)?;
     let proxy_target = next_account_info(iter)?;
     let fee_recipient= next_account_info(iter)?;
@@ -601,7 +601,10 @@ fn process_proxy_forward(
 
     require_owned_by(nft_pda, program_id)?;
     let mut nft = NftState::try_from_slice(&nft_pda.data.borrow())?;
-
+    // владелец NFT — единственный, кто может форвардить
+    if nft.owner != *caller.key {
+        return Err(NftError::NotOwner.into());
+    }
     // Проверяем что proxy_target совпадает с записанным
     require_key(&nft.proxy_target, proxy_target.key, NftError::WrongProxyTarget)?;
 
