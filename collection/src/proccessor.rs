@@ -389,13 +389,14 @@ fn process_split_fraction(
     let nft_pda          = next_account_info(iter)?; // новый аккаунт для доли (ещё не существует)
     let mint             = next_account_info(iter)?; // новый SPL-mint для доли
     let token_account    = next_account_info(iter)?; // ATA, куда попадёт токен доли
+    let new_owner_info = next_account_info(iter)?; // получатель доли
     let metadata_account = next_account_info(iter)?; // Metaplex metadata для доли
     let metadata_program = next_account_info(iter)?;
     let token_program    = next_account_info(iter)?;
     let ata_program      = next_account_info(iter)?;
     let system_prog      = next_account_info(iter)?;
     let rent_sysvar      = next_account_info(iter)?;
-    let new_owner_info = next_account_info(iter)?; // получатель доли
+
 
     // `?` — если next_account_info() вернёт ошибку (аккаунтов прислали меньше,
     // чем нужно), функция сразу прервётся и вернёт эту ошибку наверх.
