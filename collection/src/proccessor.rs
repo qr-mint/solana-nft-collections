@@ -585,7 +585,6 @@ fn process_split_fraction(
 //   Address:  накопленные lamports → proxy_target (за вычетом fee → fee_recipient)
 //   AddressV2: всё → proxy_target, без fee
 //   AddressV5: накопленные → proxy_target, fee → owner NFT
-//   V4Fraction: доли → дочерние NFT PDA, остаток → proxy_target
 // ════════════════════════════════════════════════════════
 
 fn process_proxy_forward(
@@ -625,13 +624,6 @@ fn process_proxy_forward(
         return Err(NftError::NothingToForward.into());
     }
 
-    // V4Fraction — особая логика: распределяем по дочерним NFT
-    if nft.kind == NftKind::AddressV4Fraction {
-        return process_fraction_forward(
-            nft_pda, proxy_target, accounts, &mut nft, available,
-        );
-    }
-
     // Address / AddressV2 / AddressV5
     let (fee_amount, target_amount) = if nft.kind == NftKind::AddressV2 {
         (0u64, available)
@@ -668,66 +660,144 @@ fn process_proxy_forward(
     Ok(())
 }
 
-/// V4Fraction: распределяем available по долям дочерних NFT,
-/// остаток → proxy_target
-fn process_fraction_forward<'a>(
-    nft_pda: &AccountInfo<'a>,
-    proxy_target: &AccountInfo<'a>,
-    all_accounts: &[AccountInfo<'a>],
-    nft: &mut NftState,
-    available: u64,
+fn process_claim_parent_share(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
 ) -> ProgramResult {
-    // accounts[5..] = child NFT PDA в порядке fraction_children
-    let child_accounts = &all_accounts[5..];
+    let iter = &mut accounts.iter();
+    let owner      = next_account_info(iter)?;
+    let parent_pda = next_account_info(iter)?;
+    let wallet     = next_account_info(iter)?;
 
-    if child_accounts.len() != nft.fraction_children.len() {
-        return Err(NftError::FractionAccountMismatch.into());
+    require_signer(owner)?;
+    require_owned_by(parent_pda, program_id)?;
+
+    let mut parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
+
+    if parent.owner != *owner.key {
+        return Err(NftError::NotOwner.into());
+    }
+    if parent.kind != NftKind::AddressV4Fraction {
+        return Err(NftError::WrongNftKind.into());
     }
 
-    let mut distributed: u64 = 0;
+    // доля родителя = всё, что не роздано детям
+    let children_bps: u32 = parent.fraction_children.iter()
+        .map(|c| c.share_bps as u32)
+        .sum();
+    if children_bps > 10000 {
+        return Err(NftError::InvalidFractions.into()); // защитная проверка, не должно случаться
+    }
+    let parent_share_bps = (10000 - children_bps) as u16;
 
-    for (i, child) in nft.fraction_children.iter().enumerate() {
-        require_key(
-            &child.child_nft_pda,
-            child_accounts[i].key,
-            NftError::FractionAccountMismatch,
-        )?;
-
-        let share = available
-            .checked_mul(child.share_bps as u64)
-            .ok_or(NftError::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(NftError::MathOverflow)?;
-
-        if share > 0 {
-            **nft_pda.try_borrow_mut_lamports()? -= share;
-            **child_accounts[i].try_borrow_mut_lamports()? += share;
-
-            // Обновляем total_received дочернего NFT
-            let mut child_state =
-                NftState::try_from_slice(&child_accounts[i].data.borrow())?;
-            child_state.total_received_lamports =
-                child_state.total_received_lamports.saturating_add(share);
-            child_state.serialize(&mut *child_accounts[i].try_borrow_mut_data()?)?;
-        }
-        distributed = distributed.saturating_add(share);
+    if parent_share_bps == 0 {
+        return Err(NftError::NothingToClaim.into()); // всё роздано детям, родителю нечего забирать
     }
 
-    // Остаток → proxy_target
-    let remainder = available.saturating_sub(distributed);
-    if remainder > 0 {
-        **nft_pda.try_borrow_mut_lamports()? -= remainder;
-        **proxy_target.try_borrow_mut_lamports()? += remainder;
+    let rent = Rent::get()?;
+    let min_balance = rent.minimum_balance(parent_pda.data_len());
+    let available = parent_pda.lamports().saturating_sub(min_balance);
+
+    let total_pool = (available as u128) + (parent.total_forwarded_lamports as u128);
+
+    let entitled_total = total_pool
+        .checked_mul(parent_share_bps as u128)
+        .ok_or(NftError::MathOverflow)?
+        .checked_div(10000)
+        .ok_or(NftError::MathOverflow)? as u64;
+
+    // сколько родитель уже забирал себе — отдельный счётчик, не путать
+    // с total_forwarded_lamports (это общий счётчик ВСЕХ выплат, включая детям)
+    let already_claimed = parent.pending_rewards_lamports; // переиспользуем как "уже забрано владельцем"
+    let claimable = entitled_total.saturating_sub(already_claimed);
+
+    if claimable == 0 {
+        return Err(NftError::NothingToClaim.into());
+    }
+    if claimable > available {
+        return Err(NftError::InsufficientFunds.into());
     }
 
-    nft.total_received_lamports = nft.total_received_lamports.saturating_add(available);
-    nft.total_forwarded_lamports = nft.total_forwarded_lamports.saturating_add(available);
-    nft.serialize(&mut *nft_pda.try_borrow_mut_data()?)?;
+    **parent_pda.try_borrow_mut_lamports()? -= claimable;
+    **wallet.try_borrow_mut_lamports()? += claimable;
 
-    msg!(
-        "FractionForward: {} total, {} to {} children, {} remainder → target",
-        available, distributed, nft.fraction_children.len(), remainder
-    );
+    parent.pending_rewards_lamports = parent.pending_rewards_lamports.saturating_add(claimable);
+    parent.total_forwarded_lamports = parent.total_forwarded_lamports.saturating_add(claimable);
+    parent.serialize(&mut *parent_pda.try_borrow_mut_data()?)?;
+
+    msg!("ClaimParentShare: parent={} claimed={}", parent_pda.key, claimable);
+    Ok(())
+}
+
+/// Владелец конкретного child-NFT (доли) забирает свою накопленную часть
+/// из родительского пула. Никто не может забрать чужую долю — только owner
+/// конкретного child_pda.
+fn process_claim_fraction_share(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let owner      = next_account_info(iter)?; // владелец доли
+    let child_pda  = next_account_info(iter)?; // сам child NFT
+    let parent_pda = next_account_info(iter)?; // родитель, откуда тянем деньги
+    let wallet     = next_account_info(iter)?; // куда зачислить (обычно = owner)
+
+    require_signer(owner)?;
+    require_owned_by(child_pda, program_id)?;
+    require_owned_by(parent_pda, program_id)?;
+
+    let mut child = NftState::try_from_slice(&child_pda.data.borrow())?;
+    let parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
+
+    if child.owner != *owner.key {
+        return Err(NftError::NotOwner.into());
+    }
+    if child.parent_nft != Some(*parent_pda.key) {
+        return Err(NftError::InvalidParent.into());
+    }
+
+    // Находим свою долю (share_bps) в списке родителя — по адресу этого child_pda
+    let share_bps = parent.fraction_children.iter()
+        .find(|c| c.child_nft_pda == *child_pda.key)
+        .map(|c| c.share_bps)
+        .ok_or(NftError::NotAFractionChild)?;
+
+    let rent = Rent::get()?;
+    let min_balance = rent.minimum_balance(parent_pda.data_len());
+    let available = parent_pda.lamports().saturating_sub(min_balance);
+    let total_pool = (available as u128) + (parent.total_forwarded_lamports as u128);
+
+    let entitled_total = total_pool
+        .checked_mul(share_bps as u128)
+        .ok_or(NftError::MathOverflow)?
+        .checked_div(10000)
+        .ok_or(NftError::MathOverflow)? as u64;
+
+    // Сколько уже забирал раньше — переиспользуем total_forwarded_lamports
+    // ребёнка как счётчик "уже выплачено этому child"
+    let already_claimed = child.total_forwarded_lamports;
+    let claimable = entitled_total.saturating_sub(already_claimed);
+
+    if claimable == 0 {
+        return Err(NftError::NothingToClaim.into());
+    }
+
+    // Защита: у родителя физически должно хватать денег на балансе
+    let rent = Rent::get()?;
+    let min_balance = rent.minimum_balance(parent_pda.data_len());
+    let parent_available = parent_pda.lamports().saturating_sub(min_balance);
+    if claimable > parent_available {
+        return Err(NftError::InsufficientFunds.into());
+    }
+
+    **parent_pda.try_borrow_mut_lamports()? -= claimable;
+    **wallet.try_borrow_mut_lamports()? += claimable;
+    parent.total_forwarded_lamports = parent.total_forwarded_lamports.saturating_add(claimable); // ← добавить
+    child.total_forwarded_lamports = child.total_forwarded_lamports.saturating_add(claimable);
+    parent.serialize(&mut *parent_pda.try_borrow_mut_data()?)?; // ← добавить
+    child.serialize(&mut *child_pda.try_borrow_mut_data()?)?;
+
+    msg!("ClaimFractionShare: child={} claimed={}", child_pda.key, claimable);
     Ok(())
 }
 
