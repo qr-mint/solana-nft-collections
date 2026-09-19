@@ -30,7 +30,13 @@ pub enum NftInstruction {
         proxy_target: Pubkey,
         proxy_fee_bps: u16,
         fraction_children: Vec<(Pubkey, u16)>,
-        parent_fraction: Option<(Pubkey, u16)>, 
+    },
+
+    SplitFraction {
+        name: String,
+        symbol: String,
+        uri: String,
+        share_bps: u16,
     },
 
     /// Forward lamports from NFT PDA to proxy target / fractions.

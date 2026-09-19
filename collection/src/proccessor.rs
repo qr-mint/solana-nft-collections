@@ -44,8 +44,12 @@ pub fn process_instruction(
             clone_reward_lamports, auto_mint_price_lamports,
         ),
        
-        NftInstruction::MintNft { name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children, parent_fraction } =>
-            process_mint_nft(program_id, accounts, name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children, parent_fraction),
+        NftInstruction::MintNft { name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children } =>
+            process_mint_nft(program_id, accounts, name, symbol, uri, seller_fee_bps, kind, proxy_target, proxy_fee_bps, fraction_children),
+        
+
+        NftInstruction::SplitFraction { name, symbol, uri, share_bps } =>
+            process_split_fraction(program_id, accounts, name, symbol, uri, share_bps),
 
         NftInstruction::ProxyForward =>
             process_proxy_forward(program_id, accounts),
@@ -139,7 +143,6 @@ fn process_mint_nft(
     proxy_target: Pubkey,
     proxy_fee_bps: u16,
     fraction_children_raw: Vec<(Pubkey, u16)>,
-    parent_fraction: Option<(Pubkey, u16)>,   // ← NEW
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
     let payer            = next_account_info(iter)?;
@@ -154,7 +157,6 @@ fn process_mint_nft(
     let ata_program      = next_account_info(iter)?;
     let system_prog      = next_account_info(iter)?;
     let rent_sysvar      = next_account_info(iter)?;
-    let parent_pda_opt   = next_account_info(iter).ok();   // ← OPTIONAL
 
     require_signer(payer)?;
     require_program(&solana_program::system_program::id(), system_prog.key)?;
@@ -179,6 +181,10 @@ fn process_mint_nft(
     let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
     if coll.minted_count >= coll.total_supply {
         return Err(NftError::CollectionFull.into());
+    }
+
+    if coll.authority != *payer.key {
+        return Err(NftError::Unauthorized.into());
     }
 
     let mint_index = coll.minted_count;
@@ -240,44 +246,6 @@ fn process_mint_nft(
         &state.try_to_vec()?,
         &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
     )?;
-
-    if let Some((parent_key, share_bps)) = parent_fraction {
-         // Родитель должен быть передан в аккаунтах
-        let parent_pda = parent_pda_opt
-            .ok_or(NftError::MissingParentAccount)?;
-
-        // Проверки
-        require_key(&parent_key, parent_pda.key, NftError::InvalidPda)?;
-        require_owned_by(parent_pda, program_id)?;
-        // 1. Проверяем родителя
-        let mut parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
-        if parent.kind != NftKind::AddressV4Fraction {
-            return Err(NftError::WrongNftKind.into());
-        }
-        if !parent.can_fraction {
-            return Err(NftError::CannotFraction.into());
-        }
-        if parent.owner != *payer.key {
-            return Err(NftError::NotOwner.into());
-        }
-        if parent.fraction_children.len() >= 8 {
-            return Err(NftError::TooManyFractions.into());
-        }
-
-        // 2. Считаем суммарный bps
-        let total: u32 = parent.fraction_children.iter()
-            .map(|c| c.share_bps as u32).sum::<u32>() + share_bps as u32;
-        if total > 10000 {
-            return Err(NftError::InvalidFractions.into());
-        }
-
-        // 3. Добавляем
-        parent.fraction_children.push(FractionChild {
-            child_nft_pda: *nft_pda.key,
-            share_bps,
-        });
-        parent.serialize(&mut *parent_pda.try_borrow_mut_data()?)?;
-    }
 
     // 2. Создаём аккаунт mint
     let rent = Rent::get()?;
@@ -396,6 +364,214 @@ fn process_mint_nft(
     coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
 
     msg!("Minted NFT #{} kind={:?} owner={} proxy_target={}", mint_index, state.kind, owner.key, proxy_target);
+    Ok(())
+}
+
+/// Создаёт "долю" (fraction share) от существующего NFT-родителя.
+/// В отличие от process_mint_nft, тут право действия — у ВЛАДЕЛЬЦА
+/// конкретного NFT-родителя, а не у authority всей коллекции.
+fn process_split_fraction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    name: String,
+    symbol: String,
+    uri: String,
+    share_bps: u16, // сколько "процентов" (в базисных пунктах, 10000 = 100%) достаётся этой доле
+) -> ProgramResult {
+    // accounts.iter() — итератор по списку аккаунтов, которые прислал клиент.
+    // next_account_info(iter) достаёт следующий аккаунт по порядку.
+    // Порядок ВАЖЕН — он должен совпадать 1-в-1 с тем, что фронт положил в keys[].
+    let iter = &mut accounts.iter();
+
+    let payer            = next_account_info(iter)?; // владелец родителя, он же платит за минт
+    let parent_pda       = next_account_info(iter)?; // NFT-родитель, из которого дробим
+    let coll_pda         = next_account_info(iter)?; // коллекция, к которой всё привязано
+    let nft_pda          = next_account_info(iter)?; // новый аккаунт для доли (ещё не существует)
+    let mint             = next_account_info(iter)?; // новый SPL-mint для доли
+    let token_account    = next_account_info(iter)?; // ATA, куда попадёт токен доли
+    let metadata_account = next_account_info(iter)?; // Metaplex metadata для доли
+    let metadata_program = next_account_info(iter)?;
+    let token_program    = next_account_info(iter)?;
+    let ata_program      = next_account_info(iter)?;
+    let system_prog      = next_account_info(iter)?;
+    let rent_sysvar      = next_account_info(iter)?;
+
+    // `?` — если next_account_info() вернёт ошибку (аккаунтов прислали меньше,
+    // чем нужно), функция сразу прервётся и вернёт эту ошибку наверх.
+    // Экономит написание if/else на каждую строку.
+
+    require_signer(payer)?;                                   // payer должен подписать транзакцию
+    require_owned_by(parent_pda, program_id)?;                 // parent_pda — аккаунт именно ВАШЕЙ программы
+    require_owned_by(coll_pda, program_id)?;
+    require_program(&solana_program::system_program::id(), system_prog.key)?;
+    require_program(&METADATA_PROGRAM_ID, metadata_program.key)?;
+    require_program(&spl_token::id(), token_program.key)?;
+
+    // Читаем состояние родителя из его аккаунта.
+    // `&parent_pda.data.borrow()` — временно "занимаем" доступ к сырым байтам аккаунта
+    // (в Solana данные хранятся как raw bytes, borsh их превращает в структуру).
+    let mut parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
+
+    // ГЛАВНАЯ ПРОВЕРКА ПРАВ: не authority коллекции, а именно владелец родителя.
+    if parent.owner != *payer.key {
+        return Err(NftError::NotOwner.into());
+    }
+    if parent.kind != NftKind::AddressV4Fraction {
+        return Err(NftError::WrongNftKind.into());
+    }
+    if !parent.can_fraction {
+        return Err(NftError::CannotFraction.into());
+    }
+    if parent.fraction_children.len() >= 8 {
+        return Err(NftError::TooManyFractions.into());
+    }
+
+    // Считаем: сумма уже существующих долей + новая доля не должна превышать 100% (10000 bps)
+    let total: u32 = parent.fraction_children.iter()
+        .map(|c| c.share_bps as u32)
+        .sum::<u32>() + share_bps as u32;
+    if total > 10000 {
+        return Err(NftError::InvalidFractions.into());
+    }
+
+    // Читаем коллекцию — нужно узнать mint_index для нового NFT (доли)
+    let mut coll = CollectionState::try_from_slice(&coll_pda.data.borrow())?;
+    if coll.minted_count >= coll.total_supply {
+        return Err(NftError::CollectionFull.into());
+    }
+
+    let mint_index = coll.minted_count;
+
+    // Пересчитываем PDA нового NFT и проверяем, что клиент прислал именно его
+    let (pda_key, bump) = Pubkey::find_program_address(
+        &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes()],
+        program_id,
+    );
+    require_key(&pda_key, nft_pda.key, NftError::InvalidPda)?;
+
+    // Собираем состояние новой доли
+    let state = NftState {
+        name: name.clone(),
+        symbol: symbol.clone(),
+        uri: uri.clone(),
+        seller_fee_bps: 0,
+        kind: NftKind::AddressV4Fraction,
+        collection: *coll_pda.key,
+        mint: *mint.key,
+        owner: *payer.key,           // доля принадлежит владельцу родителя
+        mint_index,
+        is_burned: false,
+        proxy_target: Pubkey::default(), // доля сама никуда не форвардит — см. допущение выше
+        proxy_fee_bps: 0,
+        fee_recipient: parent.fee_recipient,
+        can_fraction: false,          // доля дальше не дробится — избегаем бесконечной рекурсии
+        fraction_children: vec![],
+        original_nft: None,
+        parent_nft: Some(*parent_pda.key), // ссылка на родителя — пригодится при выплатах
+        generation: parent.generation + 1,
+        clone_count: 0,
+        pending_rewards_lamports: 0,
+        total_received_lamports: 0,
+        total_forwarded_lamports: 0,
+    };
+
+    // seeds — "пароль", по которому программа доказывает, что имеет право
+    // подписывать от имени этого PDA внутри CPI-вызовов ниже (invoke_signed)
+    let nft_seeds: &[&[u8]] = &[
+        b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump],
+    ];
+
+    // 1. Создаём сам аккаунт NftState для доли
+    create_pda_account(
+        program_id, payer, nft_pda, system_prog,
+        &state.try_to_vec()?,
+        &[b"nft", coll_pda.key.as_ref(), &mint_index.to_le_bytes(), &[bump]],
+    )?;
+
+    // 2. Регистрируем долю в родителе — дописываем в его список
+    parent.fraction_children.push(FractionChild {
+        child_nft_pda: *nft_pda.key,
+        share_bps,
+    });
+    parent.serialize(&mut *parent_pda.try_borrow_mut_data()?)?;
+
+    // 3. Создаём SPL mint для доли (точная копия шага из process_mint_nft)
+    let rent = Rent::get()?;
+    let mint_rent = rent.minimum_balance(spl_token::state::Mint::LEN);
+    invoke(
+        &system_instruction::create_account(
+            payer.key, mint.key, mint_rent,
+            spl_token::state::Mint::LEN as u64, token_program.key,
+        ),
+        &[payer.clone(), mint.clone(), system_prog.clone()],
+    )?;
+
+    invoke(
+        &spl_token::instruction::initialize_mint(
+            token_program.key, mint.key, nft_pda.key, None, 0,
+        )?,
+        &[mint.clone(), rent_sysvar.clone(), token_program.clone()],
+    )?;
+
+    // 4. Metadata
+    let metadata_ix = CreateMetadataAccountV3Builder::new()
+        .metadata(*metadata_account.key)
+        .mint(*mint.key)
+        .mint_authority(*nft_pda.key)
+        .payer(*payer.key)
+        .update_authority(*nft_pda.key, true)
+        .data(DataV2 {
+            name, symbol, uri,
+            seller_fee_basis_points: 0,
+            creators: None, collection: None, uses: None,
+        })
+        .is_mutable(true)
+        .instruction();
+
+    invoke_signed(
+        &metadata_ix,
+        &[
+            metadata_account.clone(), mint.clone(), nft_pda.clone(),
+            payer.clone(), nft_pda.clone(),
+            system_prog.clone(), rent_sysvar.clone(), metadata_program.clone(),
+        ],
+        &[nft_seeds],
+    )?;
+
+    // 5. ATA для владельца доли (= payer, он же owner родителя)
+    invoke(
+        &spl_associated_token_account::instruction::create_associated_token_account(
+            payer.key, payer.key, mint.key, token_program.key,
+        ),
+        &[
+            payer.clone(), token_account.clone(), payer.clone(), mint.clone(),
+            system_prog.clone(), token_program.clone(), ata_program.clone(),
+        ],
+    )?;
+
+    // 6. Минтим 1 токен
+    invoke_signed(
+        &spl_token::instruction::mint_to(
+            token_program.key, mint.key, token_account.key, nft_pda.key, &[], 1,
+        )?,
+        &[mint.clone(), token_account.clone(), nft_pda.clone(), token_program.clone()],
+        &[nft_seeds],
+    )?;
+
+    // 7. Отзываем mint authority — дальше никто (даже программа) не сможет доминтить
+    invoke_signed(
+        &spl_token::instruction::set_authority(
+            token_program.key, mint.key, None,
+            spl_token::instruction::AuthorityType::MintTokens, nft_pda.key, &[],
+        )?,
+        &[mint.clone(), nft_pda.clone(), token_program.clone()],
+        &[nft_seeds],
+    )?;
+
+    coll.minted_count += 1;
+    coll.serialize(&mut *coll_pda.try_borrow_mut_data()?)?;
+
+    msg!("Split: NFT #{} share={}bps parent={}", mint_index, share_bps, parent_pda.key);
     Ok(())
 }
 
