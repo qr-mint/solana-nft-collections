@@ -395,6 +395,7 @@ fn process_split_fraction(
     let ata_program      = next_account_info(iter)?;
     let system_prog      = next_account_info(iter)?;
     let rent_sysvar      = next_account_info(iter)?;
+    let new_owner_info = next_account_info(iter)?; // получатель доли
 
     // `?` — если next_account_info() вернёт ошибку (аккаунтов прислали меньше,
     // чем нужно), функция сразу прервётся и вернёт эту ошибку наверх.
@@ -458,7 +459,7 @@ fn process_split_fraction(
         kind: NftKind::AddressV4Fraction,
         collection: *coll_pda.key,
         mint: *mint.key,
-        owner: *payer.key,           // доля принадлежит владельцу родителя
+        owner: *new_owner_info.key,           // доля принадлежит владельцу родителя
         mint_index,
         is_burned: false,
         proxy_target: Pubkey::default(), // доля сама никуда не форвардит — см. допущение выше
@@ -541,10 +542,10 @@ fn process_split_fraction(
     // 5. ATA для владельца доли (= payer, он же owner родителя)
     invoke(
         &spl_associated_token_account::instruction::create_associated_token_account(
-            payer.key, payer.key, mint.key, token_program.key,
+            payer.key, new_owner_info.key, mint.key, token_program.key,
         ),
         &[
-            payer.clone(), token_account.clone(), payer.clone(), mint.clone(),
+            payer.clone(), token_account.clone(), new_owner_info.clone(), mint.clone(),
             system_prog.clone(), token_program.clone(), ata_program.clone(),
         ],
     )?;
