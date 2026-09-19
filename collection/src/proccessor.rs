@@ -747,7 +747,7 @@ fn process_claim_fraction_share(
     require_owned_by(parent_pda, program_id)?;
 
     let mut child = NftState::try_from_slice(&child_pda.data.borrow())?;
-    let parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
+    let mut parent = NftState::try_from_slice(&parent_pda.data.borrow())?;
 
     if child.owner != *owner.key {
         return Err(NftError::NotOwner.into());

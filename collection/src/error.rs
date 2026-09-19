@@ -14,7 +14,6 @@ pub enum NftError {
     #[error("Fee exceeds 50%")]            FeeTooHigh,
     #[error("Fractions exceed 10000 bps")] InvalidFractions,
     #[error("Too many fraction slots")]    TooManyFractions,
-    #[error("Fraction accounts mismatch")] FractionAccountMismatch,
     #[error("Wrong proxy target")]         WrongProxyTarget,
     #[error("Wrong fee recipient")]        WrongFeeRecipient,
     #[error("Cannot fraction this NFT")]   CannotFraction,
@@ -23,7 +22,6 @@ pub enum NftError {
     #[error("Wrong account owner")]        WrongAccountOwner,
     #[error("Wrong program id")]           WrongProgramId,
     #[error("SBT cannot be transferred")]  SbtNotTransferable,
-    #[error("Transfer not allowed")]       TransferNotAllowed,
     #[error("Already burned")]             AlreadyBurned,
     #[error("Storage is not empty, withdraw first")] StorageNotEmpty,
 
@@ -39,6 +37,11 @@ pub enum NftError {
     #[error("Duplicate fraction child")]
     DuplicateFractionChild,
 
+    #[error("Fraction share not found for this child")]
+    NotAFractionChild,
+
+    #[error("Child NFT does not belong to this parent")]
+    InvalidParent,
 }
 
 impl From<NftError> for ProgramError {
