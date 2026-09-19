@@ -43,6 +43,10 @@ pub enum NftInstruction {
     /// Accounts: [caller, nft_pda(writable), proxy_target(writable), fee_recipient(writable), system_program, ...children]
     ProxyForward,
 
+    ClaimFractionShare,
+    
+    ClaimParentShare,
+
     /// Withdraw lamports from V3/V3j storage.
     /// Accounts: [owner(signer), nft_pda(writable), destination(writable), system_program]
     Withdraw,

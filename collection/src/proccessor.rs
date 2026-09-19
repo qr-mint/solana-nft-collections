@@ -54,6 +54,10 @@ pub fn process_instruction(
         NftInstruction::ProxyForward =>
             process_proxy_forward(program_id, accounts),
 
+        NftInstruction::ClaimFractionShare => process_claim_fraction_share(program_id, accounts),
+
+        NftInstruction::ClaimParentShare => process_claim_parent_share(program_id, accounts),
+
         NftInstruction::Withdraw =>
             process_withdraw(program_id, accounts),
 
@@ -732,7 +736,7 @@ fn process_claim_parent_share(
 /// Владелец конкретного child-NFT (доли) забирает свою накопленную часть
 /// из родительского пула. Никто не может забрать чужую долю — только owner
 /// конкретного child_pda.
-fn process_claim_fraction_share(
+fn process_claim_fraction_share( 
     program_id: &Pubkey,
     accounts: &[AccountInfo],
 ) -> ProgramResult {
